@@ -111,8 +111,19 @@ def run_smoke_test(
 
     with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
         out = model(batch_dev)
+        logit_av = out["logit_av"]
 
-    logit_av = out["logit_av"]
+        # 5: Multi-Task Loss computation inside autocast
+        bce = nn.BCEWithLogitsLoss()
+        targets = batch["label"].to(device)
+        targets_v = batch["label_v"].to(device)
+        targets_a = batch["label_a"].to(device)
+
+        loss_joint = bce(logit_av, targets)
+        loss_v = bce(out["logit_v"], targets_v)
+        loss_a = bce(out["logit_a"], targets_a)
+        total_loss = loss_joint + 0.20 * (loss_v + loss_a)
+
     gate = out.get("gate")
     print(f"  [PASS] Check 4: Forward pass succeeded! Logit AV shape = {tuple(logit_av.shape)}")
     if gate is not None:
@@ -121,16 +132,6 @@ def run_smoke_test(
 
     # 5: Finite Loss
     print("\n[Check 5] Computing Multi-Task Loss...")
-    bce = nn.BCEWithLogitsLoss()
-    targets = batch["label"].to(device)
-    targets_v = batch["label_v"].to(device)
-    targets_a = batch["label_a"].to(device)
-
-    loss_joint = bce(out["logit_av"], targets)
-    loss_v = bce(out["logit_v"], targets_v)
-    loss_a = bce(out["logit_a"], targets_a)
-    total_loss = loss_joint + 0.20 * (loss_v + loss_a)
-
     loss_val = float(total_loss.item())
     print(f"  [PASS] Check 5: Multi-task loss = {loss_val:.4f} (Finite = {torch.isfinite(total_loss).item()})")
     assert torch.isfinite(total_loss).item(), "Loss is NaN or Infinite!"
@@ -138,17 +139,47 @@ def run_smoke_test(
     # 6: Backpropagation & Valid Gradients
     print("\n[Check 6] Running Backpropagation...")
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            scaler = torch.amp.GradScaler(device.type, init_scale=1024.0, enabled=use_amp)
+        except Exception:
+            scaler = torch.cuda.amp.GradScaler(init_scale=1024.0, enabled=use_amp)
+    else:
+        scaler = torch.cuda.amp.GradScaler(init_scale=1024.0, enabled=use_amp)
 
     scaler.scale(total_loss).backward()
     scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
 
     grad_norms = []
+    has_nonfinite = False
     for name, p in model.named_parameters():
         if p.requires_grad:
             assert p.grad is not None, f"Missing gradient for {name}"
-            assert torch.isfinite(p.grad).all(), f"Non-finite gradient in {name}"
-            grad_norms.append(p.grad.norm().item())
+            if not torch.isfinite(p.grad).all():
+                has_nonfinite = True
+            else:
+                grad_norms.append(p.grad.norm().item())
+
+    if has_nonfinite:
+        print("  [!] Scale overflow detected on initial step. Verifying scaler dynamic recovery...")
+        scaler.step(optimizer)
+        scaler.update()
+        print(f"  Dynamic backoff adjusted scaler to: {scaler.get_scale()}")
+        optimizer.zero_grad()
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            out = model(batch_dev)
+            loss_joint = bce(out["logit_av"], targets)
+            loss_v = bce(out["logit_v"], targets_v)
+            loss_a = bce(out["logit_a"], targets_a)
+            total_loss = loss_joint + 0.20 * (loss_v + loss_a)
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        grad_norms = [p.grad.norm().item() for p in model.parameters() if p.requires_grad and p.grad is not None]
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                assert torch.isfinite(p.grad).all(), f"Non-finite gradient in {name} after scaler recovery"
 
     mean_grad = sum(grad_norms) / len(grad_norms)
     print(f"  [PASS] Check 6: Gradients verified across all {len(grad_norms)} parameters. Mean grad norm = {mean_grad:.6f}")

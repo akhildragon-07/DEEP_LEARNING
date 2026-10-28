@@ -103,7 +103,13 @@ class LAVDFTrainer:
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+            try:
+                self.scaler = torch.amp.GradScaler(self.device.type, init_scale=1024.0, enabled=self.use_amp)
+            except Exception:
+                self.scaler = torch.cuda.amp.GradScaler(init_scale=1024.0, enabled=self.use_amp)
+        else:
+            self.scaler = torch.cuda.amp.GradScaler(init_scale=1024.0, enabled=self.use_amp)
 
         # Preprocessing & DataLoaders
         self.prep_cfg = PreprocessingConfig(use_augmentation=True)
