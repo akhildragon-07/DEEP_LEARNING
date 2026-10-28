@@ -116,11 +116,11 @@ class ReliabilityGate(nn.Module):
         raw_scores = self.gate_net(combined)  # [B, 2]
 
         if has_audio is not None and has_video is not None:
-            # Mask out missing streams before softmax (-1e9)
+            # Mask out missing streams before softmax using -1e4 (safe for FP16/Half precision)
             mask_a = has_audio.float().unsqueeze(-1)
             mask_v = has_video.float().unsqueeze(-1)
             mask = torch.cat([mask_a, mask_v], dim=-1)  # [B, 2]
-            raw_scores = raw_scores.masked_fill(mask == 0, -1e9)
+            raw_scores = raw_scores.masked_fill(mask == 0, -1e4)
 
         gates = F.softmax(raw_scores, dim=-1)
         return gates
