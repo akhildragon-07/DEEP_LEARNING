@@ -415,25 +415,40 @@ def main():
     meta_path = args.metadata_path
     media_root = args.media_root
 
-    # Auto-resolve Colab KaggleHub paths if defaults don't exist
+    # Auto-resolve metadata and media paths across Kaggle and Colab
     if not os.path.exists(meta_path):
-        candidates = [
-            "/kaggle/input/localized-audio-visual-deepfake-dataset-lav-df/LAV-DF/metadata.min.json",
-            "/kaggle/input/localized-audio-visual-deepfake-dataset-lav-df/LAV-DF/metadata.json",
-            "/kaggle/input/localized-audio-visual-deepfake-dataset-lav-df/metadata.min.json",
-            "/kaggle/input/localized-audio-visual-deepfake-dataset-lav-df/metadata.json",
-            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/LAV-DF/metadata.min.json",
-            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/LAV-DF/metadata.json",
-            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/metadata.min.json",
-        ]
-        for c in candidates:
-            if os.path.exists(c):
-                meta_path = c
-                if not os.path.exists(media_root) or media_root == "data":
-                    media_root = os.path.dirname(c)
-                print(f"[Auto-Path] Located LAV-DF metadata: {meta_path}")
-                print(f"[Auto-Path] Located LAV-DF media root: {media_root}")
-                break
+        found = False
+        # 1. Search dynamically under /kaggle/input if on Kaggle
+        if os.path.exists("/kaggle/input"):
+            for root, dirs, files in os.walk("/kaggle/input"):
+                for target_meta in ["metadata.min.json", "metadata.json"]:
+                    if target_meta in files:
+                        meta_path = os.path.join(root, target_meta)
+                        media_root = root
+                        print(f"[Auto-Path] Dynamically found Kaggle metadata: {meta_path}")
+                        print(f"[Auto-Path] Dynamically set Kaggle media root: {media_root}")
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                print(f"[!] Warning: /kaggle/input exists but LAV-DF metadata was not found.")
+                print(f"    Attached in /kaggle/input: {os.listdir('/kaggle/input')}")
+                print(f"    Please attach the dataset: elin75/localized-audio-visual-deepfake-dataset-lav-df")
+
+        # 2. Search dynamically under /root/.cache/kagglehub if on Colab
+        if not found and os.path.exists("/root/.cache/kagglehub"):
+            for root, dirs, files in os.walk("/root/.cache/kagglehub"):
+                for target_meta in ["metadata.min.json", "metadata.json"]:
+                    if target_meta in files:
+                        meta_path = os.path.join(root, target_meta)
+                        media_root = root
+                        print(f"[Auto-Path] Dynamically found Colab metadata: {meta_path}")
+                        print(f"[Auto-Path] Dynamically set Colab media root: {media_root}")
+                        found = True
+                        break
+                if found:
+                    break
 
     trainer = LAVDFTrainer(
         mode=args.mode,
