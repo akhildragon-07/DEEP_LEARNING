@@ -21,6 +21,7 @@ venv/
 .venv/
 env/
 
-# OS artifacts
-.DS_Store
-Thumbs.db
+# Backups
+*_backup*/
+*_backup.md
+
