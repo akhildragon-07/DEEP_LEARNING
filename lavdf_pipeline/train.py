@@ -55,6 +55,7 @@ class LAVDFTrainer:
         save_dir: str = "checkpoints_lavdf",
         log_dir: str = "results_lavdf",
         checkpoint_prefix: str = "lavdf_",
+        drive_backup: Optional[str] = None,
         limit_samples: Optional[int] = None,
         device: Optional[str] = None,
     ):
@@ -76,11 +77,17 @@ class LAVDFTrainer:
         self.checkpoint_prefix = checkpoint_prefix
         self.limit_samples = limit_samples
 
-        # Drive backup directory auto-detection
-        self.drive_backup_dir = "/content/drive/MyDrive/RMS_AV_Checkpoints" if os.path.exists("/content/drive/MyDrive") else None
+        # Drive backup directory auto-detection or explicit configuration
+        if drive_backup:
+            self.drive_backup_dir = drive_backup
+        elif os.path.exists("/content/drive/MyDrive"):
+            self.drive_backup_dir = "/content/drive/MyDrive/RMS_AV_Checkpoints"
+        else:
+            self.drive_backup_dir = None
+
         if self.drive_backup_dir:
             os.makedirs(self.drive_backup_dir, exist_ok=True)
-            print(f"[Persistence] Google Drive detected. Auto-syncing checkpoints to: {self.drive_backup_dir}")
+            print(f"[Persistence] Google Drive auto-sync target: {self.drive_backup_dir}")
 
         os.makedirs(self.save_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
@@ -349,19 +356,20 @@ def main():
     parser.add_argument("--mode", type=str, default="rmsav", choices=["audio", "video", "fusion", "rmsav"])
     parser.add_argument("--metadata_path", type=str, default="metadata.min.json")
     parser.add_argument("--media_root", type=str, default="data")
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch_size", "--bs", type=int, default=16, dest="batch_size")
+    parser.add_argument("--epochs", "--num_epochs", type=int, default=20, dest="epochs")
+    parser.add_argument("--lr", "--learning_rate", type=float, default=1e-4, dest="lr")
     parser.add_argument("--dim", type=int, default=256)
     parser.add_argument("--aux_weight", type=float, default=0.20)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints_lavdf")
     parser.add_argument("--log_dir", type=str, default="results_lavdf")
+    parser.add_argument("--drive_backup", type=str, default=None, help="Directory on Google Drive to sync checkpoints")
     parser.add_argument("--limit_samples", type=int, default=None)
     parser.add_argument("--resume", action="store_true", default=True, help="Automatically resume from latest checkpoint if available.")
     parser.add_argument("--no_resume", dest="resume", action="store_false")
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     set_seed(args.seed)
 
@@ -396,6 +404,7 @@ def main():
         patience=args.patience,
         save_dir=args.save_dir,
         log_dir=args.log_dir,
+        drive_backup=args.drive_backup,
         limit_samples=args.limit_samples,
     )
     trainer.fit(resume=args.resume)

@@ -291,19 +291,63 @@ class LAVDFEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate LAV-DF Deepfake Detection Models.")
+    parser.add_argument("--mode", type=str, default=None, choices=["audio", "video", "fusion", "rmsav"])
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to specific model checkpoint")
     parser.add_argument("--metadata_path", type=str, default="metadata.min.json")
     parser.add_argument("--media_root", type=str, default="data")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints_lavdf")
     parser.add_argument("--output_dir", type=str, default="results_lavdf")
     parser.add_argument("--prefix", type=str, default="lavdf_")
-    args = parser.parse_args()
+    parser.add_argument("--batch_size", "--bs", type=int, default=16, dest="batch_size")
+    parser.add_argument("--split", type=str, default="test")
+    parser.add_argument("--stress_test", action="store_true", default=False)
+    args, unknown = parser.parse_known_args()
+
+    meta_path = args.metadata_path
+    media_root = args.media_root
+
+    # Auto-resolve Colab KaggleHub paths if defaults don't exist
+    if not os.path.exists(meta_path):
+        candidates = [
+            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/LAV-DF/metadata.min.json",
+            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/LAV-DF/metadata.json",
+            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/metadata.min.json",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                meta_path = c
+                if not os.path.exists(media_root) or media_root == "data":
+                    media_root = os.path.dirname(c)
+                print(f"[Auto-Path] Located LAV-DF metadata: {meta_path}")
+                print(f"[Auto-Path] Located LAV-DF media root: {media_root}")
+                break
 
     evaluator = LAVDFEvaluator(
-        metadata_path=args.metadata_path,
-        media_root=args.media_root,
+        metadata_path=meta_path,
+        media_root=media_root,
         checkpoint_dir=args.checkpoint_dir,
         output_dir=args.output_dir,
+        batch_size=args.batch_size,
     )
+
+    if args.checkpoint and args.mode:
+        if not os.path.exists(args.checkpoint):
+            print(f"[!] Specified checkpoint not found: {args.checkpoint}")
+            return
+        model = evaluator.load_checkpoint(args.checkpoint, mode=args.mode)
+        conditions = ["clean", "missing_video", "missing_audio"] if args.stress_test else ["clean"]
+        for cond in conditions:
+            res = evaluator.evaluate_model(model, mode=args.mode, condition=cond)
+            print(
+                f"  [{args.mode.upper():<7} | {cond:<14}] "
+                f"Acc: {res['accuracy']*100:.2f}% | "
+                f"Macro-F1: {res['macro_f1']*100:.2f}% | "
+                f"AUC: {res['roc_auc']:.4f} | "
+                f"ECE: {res['ece']:.4f}"
+            )
+            for cat, acc in res.get("per_category_accuracy", {}).items():
+                print(f"    - {cat:<24}: {acc*100:.2f}%")
+        return
 
     ckpt_map = {
         "audio": os.path.join(args.checkpoint_dir, f"{args.prefix}audio_best.pth"),
