@@ -9,6 +9,12 @@ Provides safe, standalone, and cached model inference across:
 """
 
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Pre-initialize PyTorch DLL runtime before OpenCV or other C-extensions on Windows
+import torch
+import torch.nn as nn
+
 import time
 import tempfile
 import logging
@@ -16,8 +22,6 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
-import torch
-import torch.nn as nn
 from PIL import Image
 
 from model import build_model, count_params

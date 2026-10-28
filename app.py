@@ -4,8 +4,14 @@ RMS-AV: Reliability- and Manipulation-Aware Selective Audio-Visual Fusion
 Interactive Research Demonstration & Deepfake Detection Dashboard
 """
 
-import io
 import os
+# Prevent Windows OpenMP / Intel DLL conflict (WinError 1114)
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Pre-initialize PyTorch DLL runtime before other C-extensions on Windows
+import torch
+
+import io
 import time
 from datetime import datetime
 from typing import Dict, Optional
