@@ -62,6 +62,7 @@ class LAVDFEvaluator:
         checkpoint_dir: str = "checkpoints_lavdf",
         output_dir: str = "results_lavdf",
         batch_size: int = 16,
+        limit_samples: Optional[int] = None,
         device: Optional[str] = None,
     ):
         self.metadata_path = metadata_path
@@ -69,6 +70,7 @@ class LAVDFEvaluator:
         self.checkpoint_dir = checkpoint_dir
         self.output_dir = output_dir
         self.batch_size = batch_size
+        self.limit_samples = limit_samples
         os.makedirs(self.output_dir, exist_ok=True)
 
         if device:
@@ -83,12 +85,13 @@ class LAVDFEvaluator:
             split="test",
             config=PreprocessingConfig(use_augmentation=False),
             is_train=False,
+            limit_samples=self.limit_samples,
         )
         self.test_loader = torch.utils.data.DataLoader(
             self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=2,
+            num_workers=4,
             collate_fn=collate_lavdf_fn,
         )
         print(f"[LAVDFEvaluator] Initialized on {self.device} with {len(self.test_dataset):,} test samples.")
@@ -300,6 +303,7 @@ def main():
     parser.add_argument("--prefix", type=str, default="lavdf_")
     parser.add_argument("--batch_size", "--bs", type=int, default=16, dest="batch_size")
     parser.add_argument("--split", type=str, default="test")
+    parser.add_argument("--limit_samples", type=int, default=None)
     parser.add_argument("--stress_test", action="store_true", default=False)
     args, unknown = parser.parse_known_args()
 
@@ -347,6 +351,7 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         output_dir=args.output_dir,
         batch_size=args.batch_size,
+        limit_samples=args.limit_samples,
     )
 
     if args.checkpoint and args.mode:
