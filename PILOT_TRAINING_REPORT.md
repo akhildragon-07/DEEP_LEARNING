@@ -174,3 +174,75 @@ python test_pilot_audit.py
   - `results/roc_curves.png` (Continuous ROC curves)
   - `results/precision_recall_curves.png` (Precision-Recall curves)
 - **Unit Test Suite:** `test_pilot_audit.py`
+
+---
+
+## 8. False Positive Diagnostic Audit, Decision Boundary Analysis & Uncertainty Resolution
+
+### 8.1 Incident Description
+During evaluation in the forensic Streamlit dashboard, an original unmanipulated face video was classified as **"LIKELY MANIPULATED"** with:
+- **Manipulation Probability:** $50.82\%$
+- **Raw Logit ($z$):** $+0.0329$
+- **Decision Cutoff ($\tau$):** $0.50$
+
+### 8.2 End-to-End Pipeline Audit
+
+| Pipeline Stage | Verified Implementation | Status |
+| :--- | :--- | :---: |
+| **Loaded Checkpoint** | `checkpoints/pilot_video_best.pth` (Epoch 1, Val AUC = 0.50) | Valid |
+| **Architecture** | `AVDetector(mode='video', dim=256, pretrained=False)` (11,340,865 params) | Match |
+| **Evaluation Mode** | `model.eval()` active; inference executed under `torch.inference_mode()` | Valid |
+| **Sigmoid Mapping** | $\sigma(0.0329) = \frac{1}{1 + e^{-0.0329}} = 0.508216$ ($50.82\%$) | Exact |
+| **Label Semantics** | Label `0.0 = Real/Authentic`, Label `1.0 = Fake/Manipulated` across all files | Consistent |
+| **Preprocessing** | RGB conversion, $224 \times 224$ bilinear resize, ImageNet normalization ($\Delta = 0.00$) | Identical |
+| **Backbone Weights** | `pretrained=False` (weights randomly initialized from Gaussian noise) | Verified |
+| **Failure Handling** | Missing checkpoints explicitly raise `RuntimeError`; no random fallback | Safe |
+
+### 8.3 Reproduction and Logit Distribution Across Pilot Splits
+
+Direct reproduction outside the UI on ground-truth pilot samples demonstrated that **all samples** output logits clustered tightly between $+0.028$ and $+0.162$:
+
+- **Train Split ($N=24$):** Logits $+0.0280$ to $+0.1625$ ($\sigma(z) \in [50.70\%, 54.05\%]$)
+  - Train authentic sample `video_037`: Logit $+0.0280 \implies 50.70\%$
+  - Train authentic sample `video_025`: Logit $+0.0371 \implies 50.93\%$
+  - Target query video: Logit $+0.0329 \implies 50.82\%$ (exact fit within the authentic cluster)
+- **Validation Split ($N=8$):** Logits $+0.0701$ to $+0.1275$ ($\sigma(z) \in [51.75\%, 53.18\%]$)
+- **Held-Out Test Split ($N=8$):** Logits $+0.0742$ to $+0.1513$ ($\sigma(z) \in [51.85\%, 53.78\%]$)
+  - Evaluated sample `video_036` (RealVideo-RealAudio): 5 extracted frames produced individual logits $\{+0.1275, +0.1244, +0.1106, +0.1174, +0.1025\}$; pooled logit $= +0.1167 \implies 52.91\%$. Under rigid $\tau = 0.50$, it yields a false positive.
+
+### 8.4 Root Cause Synthesis
+
+The false positive is **NOT** a code bug, preprocessing mismatch, or color space inversion. It is driven by three compounding factors:
+
+1. **Undertrained Visual Backbone (Primary Architectural Factor):**
+   The visual encoder is an 11.3M parameter ResNet18 trained from scratch (`pretrained=False`) on only 24 samples for 3 epochs (18 batch updates). The convolutional kernels have not converged to meaningful facial forgery feature detectors.
+2. **75% Fake Class Imbalance (Optimization Prior Shift):**
+   With 18 Fake and 6 Real training samples, the binary cross-entropy gradient shifted the final classification bias slightly positive: $\bar{b} \approx +0.10$. For any unseen face, the randomly initialized features project close to zero, causing the network to emit its training prior ($z \approx +0.03$ to $+0.12$, mapping to $50.7\%$ to $53.0\%$).
+3. **Rigid Binary Thresholding at Chance Level (Decision Rule Trigger):**
+   Applying a strict cutoff $\tau = 0.50$ directly against an uncalibrated model whose entire output range sits near $z = 0$ caused authentic faces with $z = +0.0329$ ($50.82\%$) to be classified as "LIKELY MANIPULATED" by a margin of only $+0.82\%$.
+
+### 8.5 Safe Resolution: Configurable Uncertainty Band
+
+To resolve this without altering model weights or manufacturing fabricated predictions:
+
+1. **Three-State Decision Logic (`inference.py`):**
+   Implemented an uncertainty band $[\tau - \delta, \tau + \delta]$ parameterized by threshold $\tau$ and margin $\delta$ (default $\delta = \pm 0.05$, active band $[0.450, 0.550]$):
+   $$\text{Verdict} = \begin{cases} \text{"Likely manipulated"} & \text{if } p > \tau + \delta \\ \text{"INCONCLUSIVE — MODEL SCORE NEAR THRESHOLD"} & \text{if } \tau - \delta \le p \le \tau + \delta \\ \text{"Likely authentic"} & \text{if } p < \tau - \delta \end{cases}$$
+2. **Dashboard Controls (`app.py`):**
+   Added a configurable `Uncertainty Margin (±%)` slider in the sidebar with active decision band telemetry. When $p=50.82\%$, the UI displays an amber neutral card: `⚖️ INCONCLUSIVE — MODEL SCORE NEAR THRESHOLD` with detailed diagnostic context explaining that the raw logit is near chance level ($z \approx 0$).
+3. **Verification Suites:**
+   - `test_uncertainty_band.py`: 5 unit tests validating the user reproduction case, three-state partitions, margin scaling, and integration with `InferenceEngine`.
+   - `test_inference.py`: 7 tests validating all input modes and error handling.
+
+### 8.6 Readiness Assessment for Real-World Deployment
+
+> [!CAUTION]
+> **Production Readiness: NOT READY FOR REAL-WORLD USE**
+> 
+> The pilot models are exploratory prototypes trained on a 40-sample proof-of-concept dataset. They must **not** be deployed for real-world forensic verification or legal/evidentiary authentication.
+> 
+> **Required Steps Before Production Deployment:**
+> 1. Train on the full 23 GB FakeAVCeleb / DFDC dataset (thousands of unique identities).
+> 2. Initialize with pretrained feature representations (ImageNet-1K / FaceForensics++ for visual; Wav2Vec2 / Whisper for acoustic).
+> 3. Balance class sampling ($1:1$ Real to Fake ratio) to eliminate positive prior drift.
+> 4. Perform post-hoc temperature scaling / Platt calibration on a held-out validation set.

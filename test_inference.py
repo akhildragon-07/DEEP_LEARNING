@@ -19,7 +19,9 @@ import cv2
 import torch
 from PIL import Image
 
-from inference import InferenceEngine
+from inference import InferenceEngine, INCONCLUSIVE_VERDICT
+
+VALID_VERDICTS = ["Likely authentic", "Likely manipulated", INCONCLUSIVE_VERDICT]
 
 
 class TestInferenceEngine(unittest.TestCase):
@@ -48,7 +50,7 @@ class TestInferenceEngine(unittest.TestCase):
 
         res = self.engine.predict_image(pil_img, filename="test_synthetic.png")
         self.assertIn("prediction", res)
-        self.assertIn(res["prediction"], ["Likely authentic", "Likely manipulated"])
+        self.assertIn(res["prediction"], VALID_VERDICTS)
         self.assertTrue(0.0 <= res["manipulation_probability"] <= 1.0)
         self.assertTrue(0.0 <= res["authenticity_probability"] <= 1.0)
         self.assertAlmostEqual(res["manipulation_probability"] + res["authenticity_probability"], 1.0, places=5)
@@ -59,7 +61,7 @@ class TestInferenceEngine(unittest.TestCase):
         if os.path.exists(sample_jpg):
             with open(sample_jpg, "rb") as f:
                 res_real = self.engine.predict_image(f.read(), filename="video_000_f0.jpg")
-            self.assertIn(res_real["prediction"], ["Likely authentic", "Likely manipulated"])
+            self.assertIn(res_real["prediction"], VALID_VERDICTS)
 
     def test_predict_audio(self):
         """Test Mode C with existing pilot audio file."""
@@ -75,7 +77,7 @@ class TestInferenceEngine(unittest.TestCase):
 
         res = self.engine.predict_audio(audio_bytes, filename="video_000.wav")
         self.assertIn("prediction", res)
-        self.assertIn(res["prediction"], ["Likely authentic", "Likely manipulated"])
+        self.assertIn(res["prediction"], VALID_VERDICTS)
         self.assertTrue(0.0 <= res["manipulation_probability"] <= 1.0)
         self.assertGreater(res["duration_seconds"], 0.0)
         self.assertEqual(res["mode_used"], "audio")

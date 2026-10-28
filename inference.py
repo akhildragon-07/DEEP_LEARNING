@@ -41,6 +41,8 @@ DEFAULT_CHECKPOINTS = {
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
 
+INCONCLUSIVE_VERDICT = "INCONCLUSIVE — MODEL SCORE NEAR THRESHOLD"
+
 
 class InferenceEngine:
     def __init__(
@@ -255,14 +257,36 @@ class InferenceEngine:
         return mel_tensor, duration
 
     # -------------------------------------------------------------------------
-    # Standalone Prediction Methods
+    # Standalone Prediction Methods & Decision Logic
     # -------------------------------------------------------------------------
+
+    @staticmethod
+    def classify_prediction(
+        prob: float,
+        threshold: float = 0.50,
+        uncertainty_margin: float = 0.05,
+    ) -> Tuple[str, bool, Tuple[float, float]]:
+        """
+        Classifies manipulation probability with a configurable uncertainty band.
+        If prob falls in [threshold - margin, threshold + margin], returns INCONCLUSIVE.
+        Returns: (verdict_label, is_inconclusive, (lower_bound, upper_bound))
+        """
+        lower = max(0.0, float(threshold - uncertainty_margin))
+        upper = min(1.0, float(threshold + uncertainty_margin))
+
+        if lower <= prob <= upper:
+            return INCONCLUSIVE_VERDICT, True, (round(lower, 4), round(upper, 4))
+        elif prob > upper:
+            return "Likely manipulated", False, (round(lower, 4), round(upper, 4))
+        else:
+            return "Likely authentic", False, (round(lower, 4), round(upper, 4))
 
     def predict_image(
         self,
         image_input: Union[str, bytes, Image.Image],
         filename: str = "uploaded_image.jpg",
         threshold: float = 0.50,
+        uncertainty_margin: float = 0.05,
     ) -> Dict:
         """
         Mode A: Visual-only prediction on a single still image.
@@ -277,7 +301,7 @@ class InferenceEngine:
         video_t = frame_t.unsqueeze(0).repeat(5, 1, 1, 1).unsqueeze(0).to(self.device)
 
         model = self.models["video"]
-        with torch.no_grad():
+        with torch.inference_mode():
             batch = {
                 "video": video_t,
                 "audio": None,
@@ -290,8 +314,10 @@ class InferenceEngine:
             raw_logit = float(logit.cpu().item())
 
         elapsed = time.time() - t0
-        pred_label = "Likely manipulated" if prob >= threshold else "Likely authentic"
-        is_uncertain = (0.45 <= prob <= 0.55)
+        pred_label, is_inconclusive, (low_b, up_b) = self.classify_prediction(
+            prob, threshold=threshold, uncertainty_margin=uncertainty_margin
+        )
+        is_uncertain = is_inconclusive or (0.45 <= prob <= 0.55)
 
         return {
             "prediction": pred_label,
@@ -299,6 +325,9 @@ class InferenceEngine:
             "authenticity_probability": 1.0 - prob,
             "raw_logit": round(raw_logit, 4),
             "threshold_applied": threshold,
+            "uncertainty_margin": uncertainty_margin,
+            "uncertainty_band": [low_b, up_b],
+            "is_inconclusive": is_inconclusive,
             "is_uncertain": is_uncertain,
             "mode_used": "video (visual-only)",
             "media_type": "Still Image (Visual Only)",
@@ -314,6 +343,7 @@ class InferenceEngine:
         filename: str = "uploaded_video.mp4",
         num_frames: int = 5,
         threshold: float = 0.50,
+        uncertainty_margin: float = 0.05,
     ) -> Dict:
         """
         Mode B: Multi-frame visual prediction on a video stream.
@@ -326,7 +356,7 @@ class InferenceEngine:
         video_t = frames_t.unsqueeze(0).to(self.device)  # [1, 5, 3, 224, 224]
 
         model = self.models["video"]
-        with torch.no_grad():
+        with torch.inference_mode():
             batch = {
                 "video": video_t,
                 "audio": None,
@@ -339,8 +369,10 @@ class InferenceEngine:
             raw_logit = float(logit.cpu().item())
 
         elapsed = time.time() - t0
-        pred_label = "Likely manipulated" if prob >= threshold else "Likely authentic"
-        is_uncertain = (0.45 <= prob <= 0.55)
+        pred_label, is_inconclusive, (low_b, up_b) = self.classify_prediction(
+            prob, threshold=threshold, uncertainty_margin=uncertainty_margin
+        )
+        is_uncertain = is_inconclusive or (0.45 <= prob <= 0.55)
 
         return {
             "prediction": pred_label,
@@ -348,6 +380,9 @@ class InferenceEngine:
             "authenticity_probability": 1.0 - prob,
             "raw_logit": round(raw_logit, 4),
             "threshold_applied": threshold,
+            "uncertainty_margin": uncertainty_margin,
+            "uncertainty_band": [low_b, up_b],
+            "is_inconclusive": is_inconclusive,
             "is_uncertain": is_uncertain,
             "mode_used": "video",
             "media_type": "Video Stream (Visual Frames)",
@@ -364,6 +399,7 @@ class InferenceEngine:
         audio_input: Union[str, bytes],
         filename: str = "uploaded_audio.wav",
         threshold: float = 0.50,
+        uncertainty_margin: float = 0.05,
     ) -> Dict:
         """
         Mode C: Acoustic prediction on an audio track.
@@ -376,7 +412,7 @@ class InferenceEngine:
         audio_t = mel_t.unsqueeze(0).to(self.device)  # [1, 1, 80, 400]
 
         model = self.models["audio"]
-        with torch.no_grad():
+        with torch.inference_mode():
             batch = {
                 "video": None,
                 "audio": audio_t,
@@ -389,8 +425,10 @@ class InferenceEngine:
             raw_logit = float(logit.cpu().item())
 
         elapsed = time.time() - t0
-        pred_label = "Likely manipulated" if prob >= threshold else "Likely authentic"
-        is_uncertain = (0.45 <= prob <= 0.55)
+        pred_label, is_inconclusive, (low_b, up_b) = self.classify_prediction(
+            prob, threshold=threshold, uncertainty_margin=uncertainty_margin
+        )
+        is_uncertain = is_inconclusive or (0.45 <= prob <= 0.55)
 
         return {
             "prediction": pred_label,
@@ -398,6 +436,9 @@ class InferenceEngine:
             "authenticity_probability": 1.0 - prob,
             "raw_logit": round(raw_logit, 4),
             "threshold_applied": threshold,
+            "uncertainty_margin": uncertainty_margin,
+            "uncertainty_band": [low_b, up_b],
+            "is_inconclusive": is_inconclusive,
             "is_uncertain": is_uncertain,
             "mode_used": "audio",
             "media_type": "Audio Track (Log-Mel Spectrogram)",
@@ -416,6 +457,7 @@ class InferenceEngine:
         audio_filename: str = "audio.wav",
         mode: str = "rmsav",
         threshold: float = 0.50,
+        uncertainty_margin: float = 0.05,
     ) -> Dict:
         """
         Mode D: Paired Audio + Video prediction using Standard Fusion or RMS-AV.
@@ -434,7 +476,7 @@ class InferenceEngine:
         audio_t = mel_t.unsqueeze(0).to(self.device)     # [1, 1, 80, 400]
 
         model = self.models[mode]
-        with torch.no_grad():
+        with torch.inference_mode():
             batch = {
                 "video": video_t,
                 "audio": audio_t,
@@ -455,8 +497,10 @@ class InferenceEngine:
                 }
 
         elapsed = time.time() - t0
-        pred_label = "Likely manipulated" if prob >= threshold else "Likely authentic"
-        is_uncertain = (0.45 <= prob <= 0.55)
+        pred_label, is_inconclusive, (low_b, up_b) = self.classify_prediction(
+            prob, threshold=threshold, uncertainty_margin=uncertainty_margin
+        )
+        is_uncertain = is_inconclusive or (0.45 <= prob <= 0.55)
 
         return {
             "prediction": pred_label,
@@ -464,6 +508,9 @@ class InferenceEngine:
             "authenticity_probability": 1.0 - prob,
             "raw_logit": round(raw_logit, 4),
             "threshold_applied": threshold,
+            "uncertainty_margin": uncertainty_margin,
+            "uncertainty_band": [low_b, up_b],
+            "is_inconclusive": is_inconclusive,
             "is_uncertain": is_uncertain,
             "mode_used": mode,
             "media_type": "Paired Multimodal (Audio + Video)",

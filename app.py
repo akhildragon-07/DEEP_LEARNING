@@ -82,6 +82,13 @@ CUSTOM_CSS = """
         padding: 18px;
         margin-top: 15px;
     }
+    .result-card-inconclusive {
+        background: rgba(210, 153, 34, 0.12);
+        border: 1px solid #d29922;
+        border-radius: 8px;
+        padding: 18px;
+        margin-top: 15px;
+    }
     .result-title-fake {
         color: #f85149;
         font-size: 22px;
@@ -91,6 +98,12 @@ CUSTOM_CSS = """
     .result-title-real {
         color: #3fb950;
         font-size: 22px;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+    .result-title-inconclusive {
+        color: #e3b341;
+        font-size: 20px;
         font-weight: 700;
         margin-bottom: 4px;
     }
@@ -183,6 +196,7 @@ if "last_result" not in st.session_state:
 
 
 def add_to_history(result: Dict):
+    band = result.get("uncertainty_band", [0.45, 0.55])
     entry = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "filename": result.get("filename", result.get("video_filename", "media")),
@@ -192,8 +206,9 @@ def add_to_history(result: Dict):
         "manipulation_prob": f"{result.get('manipulation_probability', 0.0)*100:.2f}%",
         "raw_logit": result.get("raw_logit", 0.0),
         "threshold": result.get("threshold_applied", 0.50),
+        "uncertainty_band": f"[{band[0]:.2f}, {band[1]:.2f}]",
         "latency_ms": f"{result.get('latency_ms', 0.0):.1f} ms",
-        "is_uncertain": result.get("is_uncertain", False),
+        "is_inconclusive": result.get("is_inconclusive", False),
     }
     st.session_state.history.append(entry)
 
@@ -212,13 +227,23 @@ def render_dataframe(df: pd.DataFrame, format_dict: Optional[Dict] = None):
 
 def display_results(res: Dict):
     """Renders the forensic prediction card, probability gauges, and gate distribution."""
+    is_inconclusive = res.get("is_inconclusive", False) or "INCONCLUSIVE" in res.get("prediction", "")
     is_fake = (res["prediction"] == "Likely manipulated")
     prob_fake = res["manipulation_probability"]
     prob_real = res["authenticity_probability"]
 
-    card_class = "result-card-fake" if is_fake else "result-card-real"
-    title_class = "result-title-fake" if is_fake else "result-title-real"
-    icon = "⚠️" if is_fake else "🛡️"
+    if is_inconclusive:
+        card_class = "result-card-inconclusive"
+        title_class = "result-title-inconclusive"
+        icon = "⚖️"
+    elif is_fake:
+        card_class = "result-card-fake"
+        title_class = "result-title-fake"
+        icon = "⚠️"
+    else:
+        card_class = "result-card-real"
+        title_class = "result-title-real"
+        icon = "🛡️"
 
     st.markdown(
         f"""
@@ -244,17 +269,32 @@ def display_results(res: Dict):
         st.metric("Authenticity Probability", f"{prob_real * 100:.2f}%")
         st.progress(min(max(prob_real, 0.0), 1.0))
 
-    # Prominent Uncertainty & Calibration Notice
-    if res.get("is_uncertain"):
+    band = res.get("uncertainty_band", [0.45, 0.55])
+    thresh = res.get("threshold_applied", 0.50)
+    margin = res.get("uncertainty_margin", 0.05)
+
+    if is_inconclusive:
         st.markdown(
             f"""
             <div class="uncertainty-box">
-                ⚠️ <b>High Model Uncertainty (Score: {prob_fake*100:.1f}%):</b><br>
-                The predicted probability is near the 50% chance line (logit = {res.get('raw_logit', 0.0):.3f}).<br>
-                <b>Why this happens on genuine images:</b> This pilot model was trained on only <b>24 pilot samples</b> with 
-                <b>randomly initialized weights</b> (without ImageNet pretraining) and a <b>75% fake training prior</b>. 
-                As verified in the pilot audit, the uncalibrated visual backbone outputs baseline scores around <b>51%–53%</b> for virtually all unseen faces.
-                You can adjust the <i>Decision Cutoff</i> in the sidebar to > 0.54 to account for this pilot baseline bias.
+                ⚖️ <b>Decision Uncertainty Band Triggered (Score: {prob_fake*100:.2f}%):</b><br>
+                The predicted manipulation probability falls inside the uncertainty margin [<b>{band[0]:.3f}</b>, <b>{band[1]:.3f}</b>] 
+                around threshold <b>{thresh:.2f}</b> (±{margin*100:.1f}%).<br>
+                <b>Forensic Note:</b> The raw logit is <b>{res.get('raw_logit', 0.0):+.4f}</b> (near 0.0 chance level). 
+                Because the pilot model was trained on 24 samples with random weights (no ImageNet pretraining) and a 75% fake training prior, 
+                it produces baseline outputs between 50.7% and 54.1% for unseen faces. This sample cannot be definitively classified as manipulated.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif res.get("is_uncertain"):
+        st.markdown(
+            f"""
+            <div class="uncertainty-box">
+                ⚠️ <b>Borderline Model Confidence (Score: {prob_fake*100:.1f}%):</b><br>
+                The predicted score is close to the decision boundary (logit = {res.get('raw_logit', 0.0):+.4f}).<br>
+                <b>Pilot Baseline Notice:</b> Pilot training artifacts may cause uncalibrated scores near threshold. 
+                Full dataset training with pretrained weights is recommended for definitive forensic verdicts.
             </div>
             """,
             unsafe_allow_html=True,
@@ -285,7 +325,10 @@ def display_results(res: Dict):
             "Media Type": res.get("media_type"),
             "Inference Mode": res.get("mode_used"),
             "Raw Logit": res.get("raw_logit"),
-            "Decision Threshold Applied": res.get("threshold_applied", 0.50),
+            "Decision Threshold": res.get("threshold_applied", 0.50),
+            "Uncertainty Margin": f"±{res.get('uncertainty_margin', 0.05)*100:.1f}%",
+            "Uncertainty Band [Lower, Upper]": res.get("uncertainty_band", [0.45, 0.55]),
+            "Is Inconclusive": res.get("is_inconclusive", False),
             "Latency": f"{res.get('latency_ms')} ms",
             "Frames Analyzed": res.get("frames_analyzed", "N/A"),
             "Audio Duration": f"{res.get('duration_seconds')} s" if "duration_seconds" in res else "N/A",
@@ -324,6 +367,18 @@ with st.sidebar:
         step=0.01,
         help="Cutoff above which a clip is classified as Manipulated. Pilot baseline prior hovers around 0.52.",
     )
+    uncertainty_margin = st.slider(
+        "Uncertainty Margin (±%)",
+        min_value=0.00,
+        max_value=0.15,
+        value=0.05,
+        step=0.005,
+        format="±%.3f",
+        help="Scores within [Threshold - Margin, Threshold + Margin] are flagged as Inconclusive to prevent false positives from uncalibrated logits near zero.",
+    )
+    b_low = max(0.0, threshold - uncertainty_margin)
+    b_high = min(1.0, threshold + uncertainty_margin)
+    st.caption(f"🛡️ Authentic: `< {b_low:.3f}` | ⚖️ Inconclusive: `[{b_low:.3f}, {b_high:.3f}]` | ⚠️ Manipulated: `> {b_high:.3f}`")
 
     st.markdown("---")
     st.subheader("Checkpoint Status")
@@ -402,7 +457,12 @@ if nav_selection == "🔬 Inference Dashboard":
                 with st.spinner("Processing image through visual backbone (ResNet18)..."):
                     try:
                         bytes_data = uploaded_file.getvalue()
-                        res = engine.predict_image(bytes_data, filename=uploaded_file.name, threshold=threshold)
+                        res = engine.predict_image(
+                            bytes_data,
+                            filename=uploaded_file.name,
+                            threshold=threshold,
+                            uncertainty_margin=uncertainty_margin,
+                        )
                         st.session_state.last_result = res
                         add_to_history(res)
                     except Exception as e:
@@ -434,7 +494,13 @@ if nav_selection == "🔬 Inference Dashboard":
                 with st.spinner(f"Extracting {num_frames} frames & running video model..."):
                     try:
                         bytes_data = uploaded_file.getvalue()
-                        res = engine.predict_video(bytes_data, filename=uploaded_file.name, num_frames=num_frames, threshold=threshold)
+                        res = engine.predict_video(
+                            bytes_data,
+                            filename=uploaded_file.name,
+                            num_frames=num_frames,
+                            threshold=threshold,
+                            uncertainty_margin=uncertainty_margin,
+                        )
                         st.session_state.last_result = res
                         add_to_history(res)
                     except Exception as e:
@@ -464,7 +530,12 @@ if nav_selection == "🔬 Inference Dashboard":
                 with st.spinner("Extracting 80-channel log-mel spectrogram & evaluating 2D CNN..."):
                     try:
                         bytes_data = uploaded_file.getvalue()
-                        res = engine.predict_audio(bytes_data, filename=uploaded_file.name, threshold=threshold)
+                        res = engine.predict_audio(
+                            bytes_data,
+                            filename=uploaded_file.name,
+                            threshold=threshold,
+                            uncertainty_margin=uncertainty_margin,
+                        )
                         st.session_state.last_result = res
                         add_to_history(res)
                     except Exception as e:
@@ -504,6 +575,7 @@ if nav_selection == "🔬 Inference Dashboard":
                             audio_filename=up_aud.name,
                             mode=fusion_arch,
                             threshold=threshold,
+                            uncertainty_margin=uncertainty_margin,
                         )
                         st.session_state.last_result = res
                         add_to_history(res)
