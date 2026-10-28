@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch checkpoints (> 100MB exceeds GitHub push limit)
+checkpoints/*.pth
+checkpoints/*.pt
+*.pth
+*.pt
+
+# Matplotlib cache
+results/.matplotlib/
+.matplotlib/
+
+# Jupyter / IPython checkpoints
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# OS artifacts
+.DS_Store
+Thumbs.db

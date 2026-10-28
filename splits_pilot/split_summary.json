@@ -1,0 +1,26 @@
+{
+  "train_samples": 24,
+  "val_samples": 8,
+  "test_samples": 8,
+  "train_class_counts": {
+    "FakeVideo-RealAudio": 6,
+    "RealVideo-FakeAudio": 6,
+    "FakeVideo-FakeAudio": 6,
+    "RealVideo-RealAudio": 6
+  },
+  "val_class_counts": {
+    "FakeVideo-FakeAudio": 2,
+    "RealVideo-FakeAudio": 2,
+    "RealVideo-RealAudio": 2,
+    "FakeVideo-RealAudio": 2
+  },
+  "test_class_counts": {
+    "FakeVideo-FakeAudio": 2,
+    "RealVideo-FakeAudio": 2,
+    "RealVideo-RealAudio": 2,
+    "FakeVideo-RealAudio": 2
+  },
+  "identity_overlap_train_val": 0,
+  "identity_overlap_train_test": 0,
+  "identity_overlap_val_test": 0
+}
