@@ -309,6 +309,10 @@ def main():
     # Auto-resolve Colab KaggleHub paths if defaults don't exist
     if not os.path.exists(meta_path):
         candidates = [
+            "/kaggle/input/localized-audio-visual-deepfake-dataset-lav-df/LAV-DF/metadata.min.json",
+            "/kaggle/input/localized-audio-visual-deepfake-dataset-lav-df/LAV-DF/metadata.json",
+            "/kaggle/input/localized-audio-visual-deepfake-dataset-lav-df/metadata.min.json",
+            "/kaggle/input/localized-audio-visual-deepfake-dataset-lav-df/metadata.json",
             "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/LAV-DF/metadata.min.json",
             "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/LAV-DF/metadata.json",
             "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/metadata.min.json",
