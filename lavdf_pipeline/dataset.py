@@ -205,9 +205,10 @@ def create_lavdf_dataloaders(
         metadata_path, media_root, split="train",
         config=config, is_train=True, limit_samples=limit_samples
     )
+    val_samples = min(limit_samples, 1000) if limit_samples else None
     val_ds = LAVDFDataset(
         metadata_path, media_root, split="val",
-        config=config, is_train=False, limit_samples=limit_samples
+        config=config, is_train=False, limit_samples=val_samples
     )
     test_ds = LAVDFDataset(
         metadata_path, media_root, split="test",

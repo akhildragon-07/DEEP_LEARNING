@@ -50,7 +50,7 @@ class LAVDFTrainer:
         weight_decay: float = 1e-4,
         aux_weight: float = 0.20,
         patience: int = 5,
-        num_workers: int = 2,
+        num_workers: int = 4,
         use_amp: bool = True,
         save_dir: str = "checkpoints_lavdf",
         log_dir: str = "results_lavdf",
@@ -230,7 +230,7 @@ class LAVDFTrainer:
             all_targets.extend(targets.cpu().numpy().tolist())
             all_probs.extend(probs.tolist())
 
-            if step % 200 == 0 or step == num_batches:
+            if step % 50 == 0 or step == num_batches:
                 print(f"  [Validating] Batch {step}/{num_batches} ({step/num_batches*100:.1f}%)")
 
         val_loss = total_loss / max(len(self.val_loader), 1)
@@ -315,6 +315,21 @@ class LAVDFTrainer:
         for ep in range(start_epoch, self.epochs + 1):
             t0 = time.time()
             trn_loss = self.train_epoch(ep)
+
+            # Instantly persist latest checkpoint so training progress is never lost
+            interim_state = {
+                "epoch": ep,
+                "mode": self.mode,
+                "best_metric": best_val_metric,
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
+                "history": self.history,
+                "config": {"dim": self.dim, "mode": self.mode},
+            }
+            self._atomic_save(interim_state, latest_ckpt_path)
+
+            print(f"  [Epoch {ep}] Running validation to calculate Macro-F1 & AUROC...")
             val_loss, val_acc, val_f1, val_auc = self.validate()
             elapsed = time.time() - t0
 
