@@ -158,7 +158,12 @@ class LAVDFTrainer:
 
             self.optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            autocast_ctx = (
+                torch.amp.autocast("cuda", enabled=self.use_amp)
+                if hasattr(torch, "amp") and hasattr(torch.amp, "autocast")
+                else torch.cuda.amp.autocast(enabled=self.use_amp)
+            )
+            with autocast_ctx:
                 out = self.model(batch_dev)
                 logits_joint = out["logit_av"]
 
@@ -196,7 +201,12 @@ class LAVDFTrainer:
             }
             targets = batch["label"].to(self.device, non_blocking=True)
 
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            autocast_ctx = (
+                torch.amp.autocast("cuda", enabled=self.use_amp)
+                if hasattr(torch, "amp") and hasattr(torch.amp, "autocast")
+                else torch.cuda.amp.autocast(enabled=self.use_amp)
+            )
+            with autocast_ctx:
                 out = self.model(batch_dev)
                 logits = out["logit_av"]
                 loss = self.bce_loss(logits, targets)
