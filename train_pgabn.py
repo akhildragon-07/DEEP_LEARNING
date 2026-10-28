@@ -42,7 +42,7 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 # Import local PG-ABN modular architecture and dataset
-from model import PGABN, build_pgabn_model
+from model_pgabn import PGABN, build_pgabn_model
 from dataset import FakeAVCelebDataset
 
 # Setup publication-grade logging

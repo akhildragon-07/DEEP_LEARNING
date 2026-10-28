@@ -283,6 +283,7 @@ class InferenceEngine:
             out = model(batch)
             logit = out["logit_av"]
             prob = float(torch.sigmoid(logit).cpu().item())
+            raw_logit = float(logit.cpu().item())
 
         elapsed = time.time() - t0
         pred_label = "Likely manipulated" if prob >= threshold else "Likely authentic"
@@ -292,6 +293,8 @@ class InferenceEngine:
             "prediction": pred_label,
             "manipulation_probability": prob,
             "authenticity_probability": 1.0 - prob,
+            "raw_logit": round(raw_logit, 4),
+            "threshold_applied": threshold,
             "is_uncertain": is_uncertain,
             "mode_used": "video (visual-only)",
             "media_type": "Still Image (Visual Only)",
@@ -329,6 +332,7 @@ class InferenceEngine:
             out = model(batch)
             logit = out["logit_av"]
             prob = float(torch.sigmoid(logit).cpu().item())
+            raw_logit = float(logit.cpu().item())
 
         elapsed = time.time() - t0
         pred_label = "Likely manipulated" if prob >= threshold else "Likely authentic"
@@ -338,6 +342,8 @@ class InferenceEngine:
             "prediction": pred_label,
             "manipulation_probability": prob,
             "authenticity_probability": 1.0 - prob,
+            "raw_logit": round(raw_logit, 4),
+            "threshold_applied": threshold,
             "is_uncertain": is_uncertain,
             "mode_used": "video",
             "media_type": "Video Stream (Visual Frames)",
@@ -376,6 +382,7 @@ class InferenceEngine:
             out = model(batch)
             logit = out["logit_av"]
             prob = float(torch.sigmoid(logit).cpu().item())
+            raw_logit = float(logit.cpu().item())
 
         elapsed = time.time() - t0
         pred_label = "Likely manipulated" if prob >= threshold else "Likely authentic"
@@ -385,6 +392,8 @@ class InferenceEngine:
             "prediction": pred_label,
             "manipulation_probability": prob,
             "authenticity_probability": 1.0 - prob,
+            "raw_logit": round(raw_logit, 4),
+            "threshold_applied": threshold,
             "is_uncertain": is_uncertain,
             "mode_used": "audio",
             "media_type": "Audio Track (Log-Mel Spectrogram)",
@@ -431,6 +440,7 @@ class InferenceEngine:
             out = model(batch)
             logit = out["logit_av"]
             prob = float(torch.sigmoid(logit).cpu().item())
+            raw_logit = float(logit.cpu().item())
 
             gate_info = None
             if out.get("gate") is not None:
@@ -448,6 +458,8 @@ class InferenceEngine:
             "prediction": pred_label,
             "manipulation_probability": prob,
             "authenticity_probability": 1.0 - prob,
+            "raw_logit": round(raw_logit, 4),
+            "threshold_applied": threshold,
             "is_uncertain": is_uncertain,
             "mode_used": mode,
             "media_type": "Paired Multimodal (Audio + Video)",

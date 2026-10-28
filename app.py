@@ -94,10 +94,11 @@ CUSTOM_CSS = """
         background: rgba(210, 153, 34, 0.15);
         border: 1px solid #d29922;
         border-radius: 6px;
-        padding: 12px;
+        padding: 14px;
         color: #e3b341;
         font-size: 13px;
         margin-top: 12px;
+        line-height: 1.5;
     }
 
     /* Reliability Gate Meter */
@@ -128,6 +129,29 @@ CUSTOM_CSS = """
         border: 1px solid #30363d;
         color: #c9d1d9;
         margin-right: 6px;
+    }
+
+    /* Custom HTML Table */
+    table.custom-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 15px 0;
+        font-size: 13px;
+    }
+    table.custom-table th, table.custom-table td {
+        border: 1px solid #30363d;
+        padding: 8px 12px;
+        text-align: left;
+    }
+    table.custom-table th {
+        background-color: #161b22;
+        color: #58a6ff;
+    }
+    table.custom-table tr:nth-child(even) {
+        background-color: #0d1117;
+    }
+    table.custom-table tr:nth-child(odd) {
+        background-color: #161b22;
     }
 </style>
 """
@@ -160,10 +184,24 @@ def add_to_history(result: Dict):
         "mode_used": result.get("mode_used", "Unknown"),
         "prediction": result.get("prediction", "Unknown"),
         "manipulation_prob": f"{result.get('manipulation_probability', 0.0)*100:.2f}%",
+        "raw_logit": result.get("raw_logit", 0.0),
+        "threshold": result.get("threshold_applied", 0.50),
         "latency_ms": f"{result.get('latency_ms', 0.0):.1f} ms",
         "is_uncertain": result.get("is_uncertain", False),
     }
     st.session_state.history.append(entry)
+
+
+def render_dataframe(df: pd.DataFrame, format_dict: Optional[Dict] = None):
+    """Safely renders a dataframe with formatting, with automatic HTML fallback."""
+    try:
+        if format_dict:
+            st.dataframe(df.style.format(format_dict))
+        else:
+            st.dataframe(df)
+    except Exception:
+        html_str = df.to_html(classes="custom-table", index=False)
+        st.markdown(html_str, unsafe_allow_html=True)
 
 
 def display_results(res: Dict):
@@ -182,6 +220,7 @@ def display_results(res: Dict):
             <div class="{title_class}">{icon} {res['prediction'].upper()}</div>
             <div style="font-size: 14px; color: #c9d1d9;">
                 <b>Model Mode:</b> {res['mode_used'].upper()} &nbsp;|&nbsp; 
+                <b>Raw Logit:</b> {res.get('raw_logit', 'N/A')} &nbsp;|&nbsp;
                 <b>Latency:</b> {res['latency_ms']} ms
             </div>
         </div>
@@ -199,13 +238,17 @@ def display_results(res: Dict):
         st.metric("Authenticity Probability", f"{prob_real * 100:.2f}%")
         st.progress(min(max(prob_real, 0.0), 1.0))
 
-    # Uncertainty Warning
+    # Prominent Uncertainty & Calibration Notice
     if res.get("is_uncertain"):
         st.markdown(
-            """
+            f"""
             <div class="uncertainty-box">
-                ⚠️ <b>Uncertainty Warning:</b> The predicted probability lies in the margin near the 50% decision threshold (45%–55%). 
-                The model demonstrates borderline confidence on this input.
+                ⚠️ <b>High Model Uncertainty (Score: {prob_fake*100:.1f}%):</b><br>
+                The predicted probability is near the 50% chance line (logit = {res.get('raw_logit', 0.0):.3f}).<br>
+                <b>Why this happens on genuine images:</b> This pilot model was trained on only <b>24 pilot samples</b> with 
+                <b>randomly initialized weights</b> (without ImageNet pretraining) and a <b>75% fake training prior</b>. 
+                As verified in the pilot audit, the uncalibrated visual backbone outputs baseline scores around <b>51%–53%</b> for virtually all unseen faces.
+                You can adjust the <i>Decision Cutoff</i> in the sidebar to > 0.54 to account for this pilot baseline bias.
             </div>
             """,
             unsafe_allow_html=True,
@@ -235,10 +278,11 @@ def display_results(res: Dict):
             "Filename": res.get("filename", res.get("video_filename")),
             "Media Type": res.get("media_type"),
             "Inference Mode": res.get("mode_used"),
+            "Raw Logit": res.get("raw_logit"),
+            "Decision Threshold Applied": res.get("threshold_applied", 0.50),
             "Latency": f"{res.get('latency_ms')} ms",
             "Frames Analyzed": res.get("frames_analyzed", "N/A"),
             "Audio Duration": f"{res.get('duration_seconds')} s" if "duration_seconds" in res else "N/A",
-            "Threshold": "0.50 (Binary Classification)",
         }
         st.json(meta)
 
@@ -246,7 +290,7 @@ def display_results(res: Dict):
 
 
 # -----------------------------------------------------------------------------
-# Sidebar Navigation & Model Status
+# Sidebar Navigation & Settings
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.title("🛡️ RMS-AV Research")
@@ -262,6 +306,17 @@ with st.sidebar:
             "📜 Prediction History",
         ],
         index=0,
+    )
+
+    st.markdown("---")
+    st.subheader("Inference Controls")
+    threshold = st.slider(
+        "Decision Cutoff (Threshold)",
+        min_value=0.10,
+        max_value=0.90,
+        value=0.50,
+        step=0.01,
+        help="Cutoff above which a clip is classified as Manipulated. Pilot baseline prior hovers around 0.52.",
     )
 
     st.markdown("---")
@@ -326,7 +381,7 @@ if nav_selection == "🔬 Inference Dashboard":
             if uploaded_file is not None:
                 try:
                     img = Image.open(uploaded_file).convert("RGB")
-                    st.image(img, caption=f"Uploaded: {uploaded_file.name}", use_container_width=True)
+                    st.image(img, caption=f"Uploaded: {uploaded_file.name}")
                 except Exception as e:
                     st.error(f"Error opening image: {e}")
                     img = None
@@ -341,7 +396,7 @@ if nav_selection == "🔬 Inference Dashboard":
                 with st.spinner("Processing image through visual backbone (ResNet18)..."):
                     try:
                         bytes_data = uploaded_file.getvalue()
-                        res = engine.predict_image(bytes_data, filename=uploaded_file.name)
+                        res = engine.predict_image(bytes_data, filename=uploaded_file.name, threshold=threshold)
                         st.session_state.last_result = res
                         add_to_history(res)
                     except Exception as e:
@@ -373,7 +428,7 @@ if nav_selection == "🔬 Inference Dashboard":
                 with st.spinner(f"Extracting {num_frames} frames & running video model..."):
                     try:
                         bytes_data = uploaded_file.getvalue()
-                        res = engine.predict_video(bytes_data, filename=uploaded_file.name, num_frames=num_frames)
+                        res = engine.predict_video(bytes_data, filename=uploaded_file.name, num_frames=num_frames, threshold=threshold)
                         st.session_state.last_result = res
                         add_to_history(res)
                     except Exception as e:
@@ -403,7 +458,7 @@ if nav_selection == "🔬 Inference Dashboard":
                 with st.spinner("Extracting 80-channel log-mel spectrogram & evaluating 2D CNN..."):
                     try:
                         bytes_data = uploaded_file.getvalue()
-                        res = engine.predict_audio(bytes_data, filename=uploaded_file.name)
+                        res = engine.predict_audio(bytes_data, filename=uploaded_file.name, threshold=threshold)
                         st.session_state.last_result = res
                         add_to_history(res)
                     except Exception as e:
@@ -442,6 +497,7 @@ if nav_selection == "🔬 Inference Dashboard":
                             video_filename=up_vid.name,
                             audio_filename=up_aud.name,
                             mode=fusion_arch,
+                            threshold=threshold,
                         )
                         st.session_state.last_result = res
                         add_to_history(res)
@@ -492,7 +548,7 @@ elif nav_selection == "📊 Benchmark & Metrics":
             "true_positives": "TP",
             "true_negatives": "TN",
         })
-        st.dataframe(df_display.style.format({
+        render_dataframe(df_display, {
             "Accuracy": "{:.2%}",
             "Balanced Acc": "{:.2%}",
             "Precision (Fake)": "{:.2%}",
@@ -500,7 +556,7 @@ elif nav_selection == "📊 Benchmark & Metrics":
             "F1 (Fake)": "{:.4f}",
             "True Macro-F1": "{:.4f}",
             "ROC-AUC": "{:.4f}",
-        }), use_container_width=True)
+        })
 
         st.markdown(
             """
@@ -517,15 +573,15 @@ elif nav_selection == "📊 Benchmark & Metrics":
 
         with col_f1:
             if os.path.exists("results/confusion_matrices.png"):
-                st.image("results/confusion_matrices.png", caption="Confusion Matrices Across Architectures", use_container_width=True)
+                st.image("results/confusion_matrices.png", caption="Confusion Matrices Across Architectures")
             if os.path.exists("results/pilot_metrics.png"):
-                st.image("results/pilot_metrics.png", caption="Benchmark Metrics & Modality-Drop Robustness", use_container_width=True)
+                st.image("results/pilot_metrics.png", caption="Benchmark Metrics & Modality-Drop Robustness")
 
         with col_f2:
             if os.path.exists("results/roc_curves.png"):
-                st.image("results/roc_curves.png", caption="Receiver Operating Characteristic (ROC) Curves", use_container_width=True)
+                st.image("results/roc_curves.png", caption="Receiver Operating Characteristic (ROC) Curves")
             if os.path.exists("results/precision_recall_curves.png"):
-                st.image("results/precision_recall_curves.png", caption="Precision-Recall Curves (Fake Class)", use_container_width=True)
+                st.image("results/precision_recall_curves.png", caption="Precision-Recall Curves (Fake Class)")
     else:
         st.warning("No benchmark results file found at `results/pilot_comparison.csv`.")
 
@@ -577,7 +633,7 @@ elif nav_selection == "🧠 Architecture & RMS-AV":
                 "Latent Dimension": info["dim"],
                 "Checkpoint Path": os.path.basename(info["checkpoint_path"]),
             })
-    st.table(pd.DataFrame(param_data))
+    render_dataframe(pd.DataFrame(param_data))
 
 
 # -----------------------------------------------------------------------------
@@ -598,7 +654,7 @@ elif nav_selection == "📜 Prediction History":
 
     if st.session_state.history:
         df_hist = pd.DataFrame(st.session_state.history)
-        st.dataframe(df_hist, use_container_width=True)
+        render_dataframe(df_hist)
 
         col_h1, col_h2 = st.columns([1, 4])
         with col_h1:

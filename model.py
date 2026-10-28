@@ -24,6 +24,13 @@ import torchvision
 
 from reliability_gate import ReliabilityGate
 
+# Backwards compatibility with legacy PG-ABN codebase
+try:
+    from model_pgabn import PGABN, build_pgabn_model
+except ImportError:
+    PGABN = None
+    build_pgabn_model = None
+
 MODES = ("audio", "video", "fusion", "rmsav")
 
 
