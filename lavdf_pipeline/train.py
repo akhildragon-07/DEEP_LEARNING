@@ -139,12 +139,13 @@ class LAVDFTrainer:
             "lr": [],
         }
 
-    def train_epoch(self) -> float:
+    def train_epoch(self, epoch: int = 1) -> float:
         self.model.train()
         total_loss = 0.0
         num_batches = len(self.train_loader)
+        t_start = time.time()
 
-        for step, batch in enumerate(self.train_loader):
+        for step, batch in enumerate(self.train_loader, 1):
             # Send tensors to device
             batch_dev = {
                 "video": batch["video"].to(self.device, non_blocking=True),
@@ -183,6 +184,18 @@ class LAVDFTrainer:
 
             total_loss += loss.item()
 
+            if step % 50 == 0 or step == num_batches:
+                elapsed = time.time() - t_start
+                speed = step / max(elapsed, 1e-4)
+                remaining = (num_batches - step) / max(speed, 1e-4)
+                rem_m, rem_s = divmod(int(remaining), 60)
+                running_loss = total_loss / step
+                print(
+                    f"  [Epoch {epoch}/{self.epochs} | Batch {step}/{num_batches} "
+                    f"({step/num_batches*100:.1f}%)] Loss: {running_loss:.4f} | "
+                    f"Speed: {speed:.1f} b/s | ETA: {rem_m}m {rem_s:02d}s"
+                )
+
         return total_loss / max(num_batches, 1)
 
     @torch.no_grad()
@@ -191,8 +204,9 @@ class LAVDFTrainer:
         total_loss = 0.0
         all_targets = []
         all_probs = []
+        num_batches = len(self.val_loader)
 
-        for batch in self.val_loader:
+        for step, batch in enumerate(self.val_loader, 1):
             batch_dev = {
                 "video": batch["video"].to(self.device, non_blocking=True),
                 "audio": batch["audio"].to(self.device, non_blocking=True),
@@ -215,6 +229,9 @@ class LAVDFTrainer:
             total_loss += loss.item()
             all_targets.extend(targets.cpu().numpy().tolist())
             all_probs.extend(probs.tolist())
+
+            if step % 200 == 0 or step == num_batches:
+                print(f"  [Validating] Batch {step}/{num_batches} ({step/num_batches*100:.1f}%)")
 
         val_loss = total_loss / max(len(self.val_loader), 1)
         y_true = np.array(all_targets)
@@ -285,7 +302,7 @@ class LAVDFTrainer:
 
         for ep in range(start_epoch, self.epochs + 1):
             t0 = time.time()
-            trn_loss = self.train_epoch()
+            trn_loss = self.train_epoch(ep)
             val_loss, val_acc, val_f1, val_auc = self.validate()
             elapsed = time.time() - t0
 

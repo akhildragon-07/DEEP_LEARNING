@@ -111,31 +111,24 @@ class VideoPreprocessor:
             return dummy, 0, False
 
         indices = np.linspace(0, total_frames - 1, self.cfg.num_frames, dtype=int)
-        frames_dict = {}
-        target_indices = set(indices)
-
-        idx = 0
-        while cap.isOpened() and len(frames_dict) < len(target_indices):
+        frames = []
+        for frame_idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
             ret, frame = cap.read()
-            if not ret:
-                break
-            if idx in target_indices:
+            if ret and frame is not None:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames_dict[idx] = frame_rgb
-            idx += 1
+                frames.append(frame_rgb)
         cap.release()
 
-        if not frames_dict:
+        if len(frames) == 0:
             dummy = torch.zeros(self.cfg.num_frames, 3, self.cfg.img_size, self.cfg.img_size, dtype=torch.float32)
             return dummy, total_frames, False
 
-        # Assemble in temporal order
-        sorted_frames = []
-        last_valid = list(frames_dict.values())[-1]
-        for i in indices:
-            sorted_frames.append(frames_dict.get(i, last_valid))
+        # If any frames were dropped, pad with the last valid frame
+        while len(frames) < self.cfg.num_frames:
+            frames.append(frames[-1])
 
-        tensor = self.process_frames(np.array(sorted_frames))
+        tensor = self.process_frames(np.array(frames))
         return tensor, total_frames, True
 
 
