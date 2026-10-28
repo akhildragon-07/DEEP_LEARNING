@@ -76,6 +76,12 @@ class LAVDFTrainer:
         self.checkpoint_prefix = checkpoint_prefix
         self.limit_samples = limit_samples
 
+        # Drive backup directory auto-detection
+        self.drive_backup_dir = "/content/drive/MyDrive/RMS_AV_Checkpoints" if os.path.exists("/content/drive/MyDrive") else None
+        if self.drive_backup_dir:
+            os.makedirs(self.drive_backup_dir, exist_ok=True)
+            print(f"[Persistence] Google Drive detected. Auto-syncing checkpoints to: {self.drive_backup_dir}")
+
         os.makedirs(self.save_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -206,20 +212,55 @@ class LAVDFTrainer:
 
         return val_loss, acc, macro_f1, auc
 
-    def fit(self) -> Dict[str, Any]:
-        """Executes full training loop with early stopping."""
+    def _atomic_save(self, state: Dict[str, Any], target_path: str) -> None:
+        """Saves checkpoint atomically using a temp file and syncs to Drive if available."""
+        tmp_path = f"{target_path}.tmp"
+        torch.save(state, tmp_path)
+        if os.path.exists(target_path):
+            os.replace(tmp_path, target_path)
+        else:
+            os.rename(tmp_path, target_path)
+
+        if self.drive_backup_dir:
+            drive_dest = os.path.join(self.drive_backup_dir, os.path.basename(target_path))
+            try:
+                import shutil
+                shutil.copy2(target_path, drive_dest)
+            except Exception:
+                pass
+
+    def fit(self, resume: bool = True) -> Dict[str, Any]:
+        """Executes full training loop with early stopping and automatic resume."""
         best_val_metric = -1.0
         patience_counter = 0
         best_epoch = 0
+        start_epoch = 1
 
         best_ckpt_path = os.path.join(self.save_dir, f"{self.checkpoint_prefix}{self.mode}_best.pth")
         latest_ckpt_path = os.path.join(self.save_dir, f"{self.checkpoint_prefix}{self.mode}_latest.pth")
 
+        if resume and os.path.exists(latest_ckpt_path):
+            try:
+                print(f"[{self.mode.upper()} Resume] Resuming from checkpoint: {latest_ckpt_path}")
+                ckpt = torch.load(latest_ckpt_path, map_location=self.device)
+                self.model.load_state_dict(ckpt["model_state_dict"])
+                self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                if "scaler_state_dict" in ckpt and self.use_amp:
+                    self.scaler.load_state_dict(ckpt["scaler_state_dict"])
+                start_epoch = ckpt.get("epoch", 0) + 1
+                best_val_metric = ckpt.get("best_metric", -1.0)
+                best_epoch = ckpt.get("epoch", 0)
+                self.history = ckpt.get("history", self.history)
+                print(f"[{self.mode.upper()} Resume] Successfully restored epoch {start_epoch - 1} (best metric: {best_val_metric:.4f})")
+            except Exception as e:
+                print(f"[!] Warning: Failed to resume from {latest_ckpt_path}: {e}. Starting fresh.")
+                start_epoch = 1
+
         print(f"\n{'='*75}")
-        print(f"STARTING TRAINING: {self.mode.upper()} ({self.epochs} epochs)")
+        print(f"STARTING TRAINING: {self.mode.upper()} (Epochs {start_epoch} to {self.epochs})")
         print(f"{'='*75}")
 
-        for ep in range(1, self.epochs + 1):
+        for ep in range(start_epoch, self.epochs + 1):
             t0 = time.time()
             trn_loss = self.train_epoch()
             val_loss, val_acc, val_f1, val_auc = self.validate()
@@ -253,6 +294,7 @@ class LAVDFTrainer:
                 "best_metric": val_metric,
                 "model_state_dict": self.model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
+                "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
                 "config": {
                     "mode": self.mode,
                     "dim": self.dim,
@@ -262,13 +304,13 @@ class LAVDFTrainer:
                 },
                 "history": self.history,
             }
-            torch.save(ckpt_state, latest_ckpt_path)
+            self._atomic_save(ckpt_state, latest_ckpt_path)
 
             if val_metric > best_val_metric:
                 best_val_metric = val_metric
                 best_epoch = ep
                 patience_counter = 0
-                torch.save(ckpt_state, best_ckpt_path)
+                self._atomic_save(ckpt_state, best_ckpt_path)
                 print(f"  --> Saved new best checkpoint to: {os.path.basename(best_ckpt_path)} (Macro-F1: {val_f1*100:.2f}%)")
             else:
                 patience_counter += 1
@@ -311,14 +353,35 @@ def main():
     parser.add_argument("--save_dir", type=str, default="checkpoints_lavdf")
     parser.add_argument("--log_dir", type=str, default="results_lavdf")
     parser.add_argument("--limit_samples", type=int, default=None)
+    parser.add_argument("--resume", action="store_true", default=True, help="Automatically resume from latest checkpoint if available.")
+    parser.add_argument("--no_resume", dest="resume", action="store_false")
     args = parser.parse_args()
 
     set_seed(args.seed)
 
+    meta_path = args.metadata_path
+    media_root = args.media_root
+
+    # Auto-resolve Colab KaggleHub paths if defaults don't exist
+    if not os.path.exists(meta_path):
+        candidates = [
+            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/LAV-DF/metadata.min.json",
+            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/LAV-DF/metadata.json",
+            "/root/.cache/kagglehub/datasets/elin75/localized-audio-visual-deepfake-dataset-lav-df/versions/1/metadata.min.json",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                meta_path = c
+                if not os.path.exists(media_root) or media_root == "data":
+                    media_root = os.path.dirname(c)
+                print(f"[Auto-Path] Located LAV-DF metadata: {meta_path}")
+                print(f"[Auto-Path] Located LAV-DF media root: {media_root}")
+                break
+
     trainer = LAVDFTrainer(
         mode=args.mode,
-        metadata_path=args.metadata_path,
-        media_root=args.media_root,
+        metadata_path=meta_path,
+        media_root=media_root,
         dim=args.dim,
         batch_size=args.batch_size,
         epochs=args.epochs,
@@ -329,7 +392,7 @@ def main():
         log_dir=args.log_dir,
         limit_samples=args.limit_samples,
     )
-    trainer.fit()
+    trainer.fit(resume=args.resume)
 
 
 if __name__ == "__main__":

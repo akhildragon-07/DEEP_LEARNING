@@ -98,6 +98,9 @@ class ReliabilityGate(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(dim // 2, 2),
         )
+        # Initialize final gate layer to zero so gates start at neutral [0.5, 0.5] prior
+        nn.init.zeros_(self.gate_net[2].weight)
+        nn.init.zeros_(self.gate_net[2].bias)
 
     def forward(
         self,

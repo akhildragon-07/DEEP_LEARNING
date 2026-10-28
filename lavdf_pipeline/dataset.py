@@ -73,8 +73,13 @@ class LAVDFDataset(Dataset):
         filtered = []
         for r in all_entries:
             r_split = str(r.get("split", "unspecified")).lower()
-            if self.split is not None and r_split != self.split:
-                continue
+            if self.split is not None:
+                # Support 'val' <-> 'dev' aliasing transparently
+                if self.split in ["val", "dev"]:
+                    if r_split not in ["val", "dev"]:
+                        continue
+                elif r_split != self.split:
+                    continue
             filtered.append(r)
 
         if limit_samples is not None and limit_samples > 0:
@@ -90,13 +95,22 @@ class LAVDFDataset(Dataset):
         meta = self.records[idx]
         rel_file = meta.get("file", "")
         media_path = os.path.join(self.media_root, rel_file)
+        if not os.path.exists(media_path):
+            # Check if dataset is nested inside LAV-DF/
+            alt_path = os.path.join(self.media_root, "LAV-DF", rel_file)
+            if os.path.exists(alt_path):
+                media_path = alt_path
+
+        fake_periods = meta.get("fake_periods", [])
+        duration = meta.get("duration", 0.0)
 
         # 1. Video stream extraction
         video_t, num_frames, has_video = self.video_preprocessor.extract_from_video(media_path)
 
-        # 2. Audio stream extraction
-        # Note: LAV-DF files are MP4 files containing both visual frames and audio stream
-        audio_t, dur_aud, has_audio = self.audio_preprocessor.extract_from_audio(media_path)
+        # 2. Audio stream extraction (with manipulation-aware windowing)
+        audio_t, dur_aud, has_audio = self.audio_preprocessor.extract_from_audio(
+            media_path, fake_periods=fake_periods
+        )
 
         # 3. Label extraction
         n_fakes = meta.get("n_fakes", 0)
@@ -113,17 +127,17 @@ class LAVDFDataset(Dataset):
 
         # 4-way manipulation category for forensic audit
         if not mod_v and not mod_a:
-            category = "RealVideo-RealAudio"
-        elif mod_v and mod_a:
-            category = "FakeVideo-FakeAudio"
+            category = "real"
+            category_id = 0
+        elif mod_a and not mod_v:
+            category = "audio_only_fake"
+            category_id = 1
         elif mod_v and not mod_a:
-            category = "FakeVideo-RealAudio"
+            category = "video_only_fake"
+            category_id = 2
         else:
-            category = "RealVideo-FakeAudio"
-
-        # Separate temporal forgery localization annotations
-        fake_periods = meta.get("fake_periods", [])
-        duration = meta.get("duration", 0.0)
+            category = "both_modalities_fake"
+            category_id = 3
 
         return {
             "video": video_t,                       # [T, 3, H, W]
@@ -133,8 +147,9 @@ class LAVDFDataset(Dataset):
             "label": torch.tensor(binary_label, dtype=torch.float32),
             "label_v": torch.tensor(label_v, dtype=torch.float32),
             "label_a": torch.tensor(label_a, dtype=torch.float32),
+            "category_id": torch.tensor(category_id, dtype=torch.long),
             "file": rel_file,
-            "original": meta.get("original", "unknown"),
+            "original": meta.get("original") or "none",
             "category": category,
             "fake_periods": fake_periods,
             "duration": duration,
@@ -150,6 +165,7 @@ def collate_lavdf_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     labels = torch.stack([b["label"] for b in batch], dim=0)
     labels_v = torch.stack([b["label_v"] for b in batch], dim=0)
     labels_a = torch.stack([b["label_a"] for b in batch], dim=0)
+    category_ids = torch.stack([b["category_id"] for b in batch], dim=0)
 
     files = [b["file"] for b in batch]
     originals = [b["original"] for b in batch]
@@ -165,6 +181,7 @@ def collate_lavdf_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "label": labels,
         "label_v": labels_v,
         "label_a": labels_a,
+        "category_id": category_ids,
         "file": files,
         "original": originals,
         "category": categories,

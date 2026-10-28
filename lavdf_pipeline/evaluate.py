@@ -125,6 +125,7 @@ class LAVDFEvaluator:
         all_targets = []
         all_probs = []
         all_logits = []
+        all_categories = []
         gate_a_list = []
         gate_v_list = []
 
@@ -157,6 +158,12 @@ class LAVDFEvaluator:
             all_targets.extend(targets.tolist())
             all_probs.extend(probs.tolist())
             all_logits.extend(logits.tolist())
+            all_categories.extend(batch.get("category", []))
+
+            if out.get("gate") is not None:
+                gates = out["gate"].cpu().numpy()
+                gate_a_list.extend(gates[:, 0].tolist())
+                gate_v_list.extend(gates[:, 1].tolist())
 
             if out.get("gate") is not None:
                 gates = out["gate"].cpu().numpy()
@@ -196,6 +203,21 @@ class LAVDFEvaluator:
         brier = brier_score_loss(y_true, y_prob)
         ece = compute_ece(y_prob, y_true)
 
+        # Per-Category Diagnostic Breakdown
+        cats_arr = np.array(all_categories)
+        cat_metrics = {}
+        for c_name in ["real", "audio_only_fake", "video_only_fake", "both_modalities_fake"]:
+            mask = (cats_arr == c_name)
+            if np.sum(mask) > 0:
+                sub_true = y_true[mask]
+                sub_pred = y_pred[mask]
+                sub_acc = float(np.mean(sub_pred == sub_true))
+                cat_metrics[f"acc_{c_name}"] = round(sub_acc, 4)
+                cat_metrics[f"count_{c_name}"] = int(np.sum(mask))
+            else:
+                cat_metrics[f"acc_{c_name}"] = 0.0
+                cat_metrics[f"count_{c_name}"] = 0
+
         results = {
             "mode": mode,
             "condition": condition,
@@ -216,6 +238,7 @@ class LAVDFEvaluator:
             "pr_auc": round(float(ap), 4),
             "brier_score": round(float(brier), 4),
             "ece": round(float(ece), 4),
+            **cat_metrics,
         }
 
         if gate_a_list:

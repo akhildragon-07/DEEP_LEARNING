@@ -27,18 +27,23 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3
 
 @dataclass
 class PreprocessingConfig:
-    # Video settings
-    num_frames: int = 5
+    # Video settings (aligned with Untitled0.ipynb)
+    num_frames: int = 8
     img_size: int = 224
     fps: int = 25
-    # Audio settings
+    # Audio settings (aligned with Untitled0.ipynb)
     sample_rate: int = 16000
     n_mels: int = 80
     n_fft: int = 400
     hop_length: int = 160
-    target_audio_frames: int = 400
+    target_audio_frames: int = 401
+    target_audio_seconds: float = 4.0
     # Augmentation controls
     use_augmentation: bool = False
+    # Normalization mode: 'imagenet' or 'unit' ([0, 1])
+    video_norm: str = "imagenet"
+    # Audio crop policy: 'manipulation_aware' or 'start'
+    audio_crop_policy: str = "manipulation_aware"
 
 
 class VideoPreprocessor:
@@ -75,7 +80,10 @@ class VideoPreprocessor:
                 beta = np.random.uniform(-10, 10)
                 img = np.clip(alpha * img + beta, 0, 255).astype(np.uint8)
 
-            norm = ((img / 255.0) - IMAGENET_MEAN) / IMAGENET_STD
+            if self.cfg.video_norm == "imagenet":
+                norm = ((img / 255.0) - IMAGENET_MEAN) / IMAGENET_STD
+            else:
+                norm = (img / 255.0).astype(np.float32)
             processed.append(norm)
 
         arr = np.array(processed, dtype=np.float32)  # [T, H, W, 3]
@@ -191,20 +199,76 @@ class AudioPreprocessor:
 
         return log_mel
 
-    def extract_from_audio(self, audio_path: str) -> Tuple[torch.Tensor, float, bool]:
+    def extract_from_audio(
+        self,
+        media_path: str,
+        fake_periods: Optional[list] = None,
+    ) -> Tuple[torch.Tensor, float, bool]:
         """
-        Extracts 80-channel log-mel spectrogram from a WAV audio file.
+        Extracts 80-channel log-mel spectrogram from a media file (MP4 video or WAV audio).
+        Applies manipulation-aware cropping when fake_periods is provided.
         Returns: (spec_tensor [1, n_mels, target_audio_frames], duration_seconds, success_flag)
         """
-        if not os.path.exists(audio_path):
+        if not os.path.exists(media_path):
             dummy = torch.zeros(1, self.cfg.n_mels, self.cfg.target_audio_frames, dtype=torch.float32)
             return dummy, 0.0, False
 
+        waveform = None
+        sr = self.cfg.sample_rate
+
+        # Attempt fast ffmpeg stream decoding (optimal for MP4 video containers)
         try:
-            waveform, sr = torchaudio.load(audio_path)
-            duration = waveform.shape[-1] / float(sr)
-            spec = self.process_waveform(waveform, sr)
-            return spec, duration, True
+            import subprocess
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-i", media_path,
+                    "-vn", "-ac", "1", "-ar", str(self.cfg.sample_rate),
+                    "-f", "f32le", "-"
+                ],
+                capture_output=True,
+                check=True
+            )
+            raw_audio = np.frombuffer(result.stdout, dtype=np.float32).copy()
+            if len(raw_audio) > 0:
+                waveform = torch.from_numpy(raw_audio).unsqueeze(0)
         except Exception:
-            dummy = torch.zeros(1, self.cfg.n_mels, self.cfg.target_audio_frames, dtype=torch.float32)
-            return dummy, 0.0, False
+            waveform = None
+
+        # Fallback to torchaudio if ffmpeg pipe failed
+        if waveform is None:
+            try:
+                w, loaded_sr = torchaudio.load(media_path)
+                if loaded_sr != self.cfg.sample_rate:
+                    resampler = T.Resample(loaded_sr, self.cfg.sample_rate)
+                    w = resampler(w)
+                if w.shape[0] > 1:
+                    w = w.mean(dim=0, keepdim=True)
+                waveform = w
+            except Exception:
+                dummy = torch.zeros(1, self.cfg.n_mels, self.cfg.target_audio_frames, dtype=torch.float32)
+                return dummy, 0.0, False
+
+        total_samples = waveform.shape[-1]
+        duration = total_samples / float(self.cfg.sample_rate)
+        target_samples = int(self.cfg.sample_rate * self.cfg.target_audio_seconds)
+
+        # Audio Crop Policy: Manipulation-Aware vs Start Crop
+        if self.cfg.audio_crop_policy == "manipulation_aware" and fake_periods and duration > self.cfg.target_audio_seconds:
+            try:
+                # Find midpoint of primary fake segment
+                f_start, f_end = fake_periods[0][0], fake_periods[0][1]
+                midpoint_sec = (float(f_start) + float(f_end)) / 2.0
+                crop_start_sec = max(0.0, min(midpoint_sec - (self.cfg.target_audio_seconds / 2.0), duration - self.cfg.target_audio_seconds))
+                start_sample = int(crop_start_sec * self.cfg.sample_rate)
+                end_sample = start_sample + target_samples
+                waveform = waveform[:, start_sample:end_sample]
+            except Exception:
+                waveform = waveform[:, :target_samples]
+        elif total_samples > target_samples:
+            waveform = waveform[:, :target_samples]
+        elif total_samples < target_samples:
+            pad_len = target_samples - total_samples
+            waveform = torch.nn.functional.pad(waveform, (0, pad_len), value=0.0)
+
+        spec = self.process_waveform(waveform, sr=self.cfg.sample_rate)
+        return spec, duration, True
