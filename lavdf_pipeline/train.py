@@ -279,6 +279,18 @@ class LAVDFTrainer:
         best_ckpt_path = os.path.join(self.save_dir, f"{self.checkpoint_prefix}{self.mode}_best.pth")
         latest_ckpt_path = os.path.join(self.save_dir, f"{self.checkpoint_prefix}{self.mode}_latest.pth")
 
+        # Fallback: Restore from Google Drive backup if local dir was reset
+        if resume and not os.path.exists(latest_ckpt_path) and self.drive_backup_dir:
+            drive_latest = os.path.join(self.drive_backup_dir, os.path.basename(latest_ckpt_path))
+            if os.path.exists(drive_latest):
+                import shutil
+                print(f"[{self.mode.upper()} Resume] Restoring latest checkpoint from Google Drive: {drive_latest}")
+                shutil.copy2(drive_latest, latest_ckpt_path)
+            drive_best = os.path.join(self.drive_backup_dir, os.path.basename(best_ckpt_path))
+            if os.path.exists(drive_best) and not os.path.exists(best_ckpt_path):
+                import shutil
+                shutil.copy2(drive_best, best_ckpt_path)
+
         if resume and os.path.exists(latest_ckpt_path):
             try:
                 print(f"[{self.mode.upper()} Resume] Resuming from checkpoint: {latest_ckpt_path}")
