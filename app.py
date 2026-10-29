@@ -475,28 +475,61 @@ if nav_selection == "🔬 Inference Dashboard":
     # Mode B: Video Upload
     elif "Mode B" in mode_tab:
         with col_input:
-            st.subheader("1. Upload Video")
-            uploaded_file = st.file_uploader(
-                "Choose a video file",
-                type=["mp4", "mov", "avi"],
-                help="Accepts MP4, MOV, or AVI video formats.",
+            st.subheader("1. Video Selection")
+            demo_choice = st.selectbox(
+                "Select Demo Preset or Upload Custom Video:",
+                [
+                    "Upload Custom File",
+                    "Preset 1: Authentic Recording (Real Face + Real Audio)",
+                    "Preset 2: FaceSwap Visual Deepfake (Manipulated Face)",
+                    "Preset 3: Voice Clone Deepfake (Manipulated Speech)",
+                    "Preset 4: Dual Deepfake (FaceSwap + Synthetic Audio)",
+                ],
+                key="vid_demo_choice"
             )
 
-            num_frames = st.slider("Frames to extract & sample uniformly:", min_value=3, max_value=10, value=5)
+            preset_paths = {
+                "Preset 1: Authentic Recording (Real Face + Real Audio)": "demo_samples/01_Authentic_RealVideo_RealAudio.mp4",
+                "Preset 2: FaceSwap Visual Deepfake (Manipulated Face)": "demo_samples/02_Asymmetric_FakeVideo_RealAudio.mp4",
+                "Preset 3: Voice Clone Deepfake (Manipulated Speech)": "demo_samples/03_Asymmetric_RealVideo_FakeAudio.mp4",
+                "Preset 4: Dual Deepfake (FaceSwap + Synthetic Audio)": "demo_samples/04_DualForged_FakeVideo_FakeAudio.mp4",
+            }
 
-            if uploaded_file is not None:
-                st.video(uploaded_file)
-            run_btn = st.button("Run Multi-Frame Video Analysis", disabled=(uploaded_file is None), type="primary")
+            bytes_data = None
+            filename = None
+            has_video = False
+
+            if demo_choice != "Upload Custom File":
+                p_path = preset_paths[demo_choice]
+                if os.path.exists(p_path):
+                    with open(p_path, "rb") as f:
+                        bytes_data = f.read()
+                    filename = os.path.basename(p_path)
+                    st.video(bytes_data)
+                    has_video = True
+            else:
+                uploaded_file = st.file_uploader(
+                    "Choose a video file",
+                    type=["mp4", "mov", "avi"],
+                    help="Accepts MP4, MOV, or AVI video formats.",
+                )
+                if uploaded_file is not None:
+                    bytes_data = uploaded_file.getvalue()
+                    filename = uploaded_file.name
+                    st.video(uploaded_file)
+                    has_video = True
+
+            num_frames = st.slider("Frames to extract & sample uniformly:", min_value=3, max_value=10, value=5)
+            run_btn = st.button("Run Multi-Frame Video Analysis", disabled=(not has_video), type="primary")
 
         with col_output:
             st.subheader("2. Forensic Analysis")
-            if run_btn and uploaded_file is not None:
+            if run_btn and has_video and bytes_data:
                 with st.spinner(f"Extracting {num_frames} frames & running video model..."):
                     try:
-                        bytes_data = uploaded_file.getvalue()
                         res = engine.predict_video(
                             bytes_data,
-                            filename=uploaded_file.name,
+                            filename=filename,
                             num_frames=num_frames,
                             threshold=threshold,
                             uncertainty_margin=uncertainty_margin,
@@ -548,9 +581,65 @@ if nav_selection == "🔬 Inference Dashboard":
     # Mode D: Paired Audio + Video Upload
     elif "Mode D" in mode_tab:
         with col_input:
-            st.subheader("1. Upload Paired Streams")
-            up_vid = st.file_uploader("Video Track (MP4 / MOV)", type=["mp4", "mov", "avi"], key="pair_vid")
-            up_aud = st.file_uploader("Audio Track (WAV)", type=["wav"], key="pair_aud")
+            st.subheader("1. Multimodal Stream Selection")
+            pair_choice = st.selectbox(
+                "Select Demo Preset or Upload Custom Streams:",
+                [
+                    "Upload Custom Streams",
+                    "Preset 1: Authentic Recording (Real Video + Real Audio)",
+                    "Preset 2: Asymmetric FaceSwap (Fake Video + Real Audio)",
+                    "Preset 3: Asymmetric Voice Clone (Real Video + Fake Audio)",
+                    "Preset 4: Dual Forgery (Fake Video + Fake Audio)",
+                ],
+                key="pair_demo_choice"
+            )
+
+            preset_pairs = {
+                "Preset 1: Authentic Recording (Real Video + Real Audio)": (
+                    "demo_samples/01_Authentic_RealVideo_RealAudio.mp4",
+                    "demo_samples/01_Authentic_RealAudio.wav"
+                ),
+                "Preset 2: Asymmetric FaceSwap (Fake Video + Real Audio)": (
+                    "demo_samples/02_Asymmetric_FakeVideo_RealAudio.mp4",
+                    "demo_samples/02_Authentic_Audio_from_FaceSwap.wav"
+                ),
+                "Preset 3: Asymmetric Voice Clone (Real Video + Fake Audio)": (
+                    "demo_samples/03_Asymmetric_RealVideo_FakeAudio.mp4",
+                    "demo_samples/03_VoiceClone_FakeAudio.wav"
+                ),
+                "Preset 4: Dual Forgery (Fake Video + Fake Audio)": (
+                    "demo_samples/04_DualForged_FakeVideo_FakeAudio.mp4",
+                    "demo_samples/04_Synthetic_FakeAudio.wav"
+                ),
+            }
+
+            v_bytes = None
+            a_bytes = None
+            vid_name = None
+            aud_name = None
+            ready = False
+
+            if pair_choice != "Upload Custom Streams":
+                p_vid, p_aud = preset_pairs[pair_choice]
+                if os.path.exists(p_vid) and os.path.exists(p_aud):
+                    with open(p_vid, "rb") as f:
+                        v_bytes = f.read()
+                    with open(p_aud, "rb") as f:
+                        a_bytes = f.read()
+                    vid_name = os.path.basename(p_vid)
+                    aud_name = os.path.basename(p_aud)
+                    st.video(v_bytes)
+                    st.audio(a_bytes)
+                    ready = True
+            else:
+                up_vid = st.file_uploader("Video Track (MP4 / MOV)", type=["mp4", "mov", "avi"], key="pair_vid")
+                up_aud = st.file_uploader("Audio Track (WAV)", type=["wav"], key="pair_aud")
+                if up_vid is not None and up_aud is not None:
+                    v_bytes = up_vid.getvalue()
+                    a_bytes = up_aud.getvalue()
+                    vid_name = up_vid.name
+                    aud_name = up_aud.name
+                    ready = True
 
             fusion_arch = st.radio(
                 "Fusion Architecture:",
@@ -558,21 +647,18 @@ if nav_selection == "🔬 Inference Dashboard":
                 format_func=lambda x: "RMS-AV (Dynamic Reliability Gate)" if x == "rmsav" else "Standard AV Fusion (Concatenation)",
             )
 
-            ready = (up_vid is not None and up_aud is not None)
             run_btn = st.button("Run Multimodal Fusion Analysis", disabled=(not ready), type="primary")
 
         with col_output:
             st.subheader("2. Multimodal Fusion Results")
-            if run_btn and ready:
+            if run_btn and ready and v_bytes and a_bytes:
                 with st.spinner(f"Extracting visual & acoustic streams, running {fusion_arch.upper()}..."):
                     try:
-                        v_bytes = up_vid.getvalue()
-                        a_bytes = up_aud.getvalue()
                         res = engine.predict_audio_video(
                             v_bytes,
                             a_bytes,
-                            video_filename=up_vid.name,
-                            audio_filename=up_aud.name,
+                            video_filename=vid_name,
+                            audio_filename=aud_name,
                             mode=fusion_arch,
                             threshold=threshold,
                             uncertainty_margin=uncertainty_margin,
