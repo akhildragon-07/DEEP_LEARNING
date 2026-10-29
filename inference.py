@@ -78,7 +78,10 @@ class InferenceEngine:
                     continue
 
             try:
-                ckpt = torch.load(full_path, map_location=self.device)
+                try:
+                    ckpt = torch.load(full_path, map_location=self.device, weights_only=False)
+                except TypeError:
+                    ckpt = torch.load(full_path, map_location=self.device)
                 cfg = ckpt.get("config", {})
                 dim = cfg.get("dim", 256)
 

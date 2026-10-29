@@ -101,7 +101,10 @@ class LAVDFEvaluator:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
-        ckpt = torch.load(checkpoint_path, map_location=self.device)
+        try:
+            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        except TypeError:
+            ckpt = torch.load(checkpoint_path, map_location=self.device)
         cfg = ckpt.get("config", {})
         dim = cfg.get("dim", 256)
 

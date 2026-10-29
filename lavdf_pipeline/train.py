@@ -294,7 +294,10 @@ class LAVDFTrainer:
         if resume and os.path.exists(latest_ckpt_path):
             try:
                 print(f"[{self.mode.upper()} Resume] Resuming from checkpoint: {latest_ckpt_path}")
-                ckpt = torch.load(latest_ckpt_path, map_location=self.device)
+                try:
+                    ckpt = torch.load(latest_ckpt_path, map_location=self.device, weights_only=False)
+                except TypeError:
+                    ckpt = torch.load(latest_ckpt_path, map_location=self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
                 if "scaler_state_dict" in ckpt and self.use_amp:

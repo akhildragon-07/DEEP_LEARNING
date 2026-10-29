@@ -46,7 +46,10 @@ class LAVDFInferenceEngine:
 
         # Load checkpoint weights
         self.model = build_lavdf_model(mode=self.mode, dim=self.dim, pretrained=False)
-        ckpt = torch.load(self.checkpoint_path, map_location=self.device)
+        try:
+            ckpt = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
+        except TypeError:
+            ckpt = torch.load(self.checkpoint_path, map_location=self.device)
 
         if "model_state_dict" not in ckpt:
             raise ValueError(f"Invalid checkpoint format in {self.checkpoint_path}. Missing 'model_state_dict'.")
