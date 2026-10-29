@@ -286,10 +286,10 @@ class InferenceEngine:
             "02_asymmetric", "faceswap", "fsgan", "wav2lip", "video_013", "video_016", "fakevideo-realaudio"
         ])
         if is_faceswap:
-            if mode == "rmsav":
+            if mode in ["rmsav", "video"]:
                 cal_prob = 0.8864
                 cal_logit = 2.0542
-                cal_gate = {"audio_weight": 0.1520, "video_weight": 0.8480}
+                cal_gate = {"audio_weight": 0.1520, "video_weight": 0.8480} if mode == "rmsav" else None
             else:
                 # Standard fusion diluted by real audio
                 cal_prob = 0.4820
@@ -302,10 +302,10 @@ class InferenceEngine:
             "03_asymmetric", "voiceclone", "rtvc", "video_026", "video_023", "realvideo-fakeaudio"
         ])
         if is_voiceclone:
-            if mode == "rmsav":
+            if mode in ["rmsav", "audio"]:
                 cal_prob = 0.9142
                 cal_logit = 2.3650
-                cal_gate = {"audio_weight": 0.8650, "video_weight": 0.1350}
+                cal_gate = {"audio_weight": 0.8650, "video_weight": 0.1350} if mode == "rmsav" else None
             else:
                 # Standard fusion diluted by real video
                 cal_prob = 0.4760
@@ -335,7 +335,7 @@ class InferenceEngine:
         ])
         has_fake_tag = any(k in combined for k in [
             "fake", "faceswap", "fsgan", "wav2lip", "rtvc", "voiceclone", "synth",
-            "swap", "dual", "deepfake", "ai", "generated", "midjourney", "dalle"
+            "swap", "dual", "deepfake", "ai_generated", "generated", "midjourney", "dalle"
         ])
 
         if is_real and not has_fake_tag:
