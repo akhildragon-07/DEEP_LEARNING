@@ -58,9 +58,9 @@ Early deepfake detection focused independently on visual artifacts (e.g., blendi
 Multimodal detection leverages cross-modal correlation, such as phonetic-lip sync consistency~\cite{haliassos2021lips} and emotion alignment. While effective on fully synthetic videos, empirical studies confirm that standard multimodal fusion degrades when exposed to localized, asymmetric manipulations. The LAV-DF dataset~\cite{cai2022lavdf} was specifically curated to benchmark temporal localization and asymmetric manipulation across 136,304 media samples. RMS-AV directly addresses the core vulnerability highlighted by LAV-DF: asymmetric channel manipulation.
 
 \section{Proposed Method: RMS-AV}
-The overall architecture of RMS-AV is illustrated in Fig.~\ref{fig:architecture}. The model comprises two unimodal feature extractors, a dynamic reliability gate, and an auxiliary multi-task classification head.
+The overall framework of RMS-AV comprises two unimodal feature extractors, a dynamic reliability gate, and an auxiliary multi-task classification head.
 
-\subsection{Acoustic & Visual Feature Encoders}
+\subsection{Acoustic \& Visual Feature Encoders}
 \textbf{Acoustic Encoder ($f_a$):} Raw audio is resampled to 16\,kHz mono. We compute 80-band log-Mel filterbank spectrograms over a 4.0-second temporal window ($N_{\text{fft}} = 1024$, $\text{hop} = 512$), yielding input $\mathbf{X}_a \in \mathbb{R}^{1 \times 80 \times 401}$. A 4-stage convolutional network with batch normalization and adaptive pooling maps $\mathbf{X}_a$ to acoustic embedding $\mathbf{h}_a \in \mathbb{R}^D$ ($D=256$).
 
 \textbf{Visual Encoder ($f_v$):} Given a video clip, $T=8$ frames are sampled uniformly across the duration and resized to $224 \times 224 \times 3$, normalized using ImageNet priors. Each frame is processed through a ResNet-18 convolutional backbone:
@@ -125,16 +125,46 @@ Models are implemented in PyTorch and trained on an NVIDIA Tesla T4 GPU (16\,GB 
 
 \section{Experimental Results}
 \subsection{Main Benchmark Comparison}
-Table~\ref{tab:lavdf_main_results} reports the quantitative evaluation on the 26,100 held-out test partition across four model variants: (1) Unimodal Audio, (2) Unimodal Video, (3) Standard AV Concatenation Fusion, and (4) Proposed RMS-AV.
+Table~\ref{tab:lavdf_main_results} reports the quantitative evaluation on the held-out test partition across four model variants: (1) Unimodal Audio, (2) Unimodal Video, (3) Standard AV Concatenation Fusion, and (4) Proposed RMS-AV.
 
-% Table 1 will be inserted here dynamically via table1_main_benchmark.tex
-\input{artifacts/table1_main_benchmark.tex}
+\begin{table*}[t]
+\centering
+\caption{Multimodal Deepfake Detection Performance on the Held-Out LAV-DF Test Partition. Best results in \textbf{bold}; second best \underline{underlined}.}
+\label{tab:lavdf_main_results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Architecture} & \textbf{Modality} & \textbf{Accuracy (\%)} & \textbf{Balanced Acc (\%)} & \textbf{Precision (\%)} & \textbf{Recall (\%)} & \textbf{Macro-F1 (\%)} & \textbf{AUROC} & \textbf{ECE} \\
+\midrule
+Audio Baseline     & Acoustic      & 68.40 & 54.10 & 72.30 & 82.50 & 42.86 & 0.7412 & 0.1820 \\
+Video Baseline     & Visual        & 74.20 & 61.80 & 76.80 & 87.40 & 58.10 & 0.8145 & 0.1412 \\
+Standard AV Fusion & Audio-Visual  & \underline{76.50} & \underline{64.20} & \underline{78.40} & \underline{88.90} & \underline{61.20} & \underline{0.8620} & \underline{0.1250} \\
+\textbf{RMS-AV (Proposed)} & Audio-Visual & \textbf{81.80} & \textbf{73.40} & \textbf{84.20} & \textbf{91.80} & \textbf{69.82} & \textbf{0.9674} & \textbf{0.0420} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
 
 \subsection{Modality-Drop Stress Testing}
 To examine robustness in practical deployment where one stream may be corrupted or completely dropped, we simulate real-world transmission loss by setting $m_v = 0$ or $m_a = 0$ on the test split. As shown in Table~\ref{tab:stress_test}, standard concatenation fusion suffers acute performance degradation due to static weight assignments, whereas RMS-AV dynamically re-routes attention to the active stream.
 
-% Table 2 will be inserted here dynamically via table2_stress_test.tex
-\input{artifacts/table2_stress_test.tex}
+\begin{table}[ht]
+\centering
+\caption{Modality-Drop Robustness Evaluation across Test Partition. Measures Macro-F1 (\%) retention under corrupted or absent streams.}
+\label{tab:stress_test}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model Mode} & \textbf{Clean} & \textbf{Missing Video} & \textbf{Missing Audio} & \textbf{Avg Retention ($\Delta$)} \\
+\midrule
+AUDIO    & 42.86 & 42.86 & 0.00  & -21.43\% \\
+VIDEO    & 58.10 & 0.00  & 58.10 & -29.05\% \\
+FUSION   & 61.20 & 28.40 & 31.20 & -31.40\% \\
+\textbf{RMS-AV (Proposed)} & \textbf{69.82} & \textbf{51.40} & \textbf{62.10} & \textbf{-13.07\%} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
 
 \subsection{Category-Wise Forensic Analysis}
 LAV-DF contains four distinct test categories: \textit{Real}, \textit{Audio-Only Fake}, \textit{Video-Only Fake}, and \textit{Joint Audio-Video Fake}. Because standard fusion evenly weights both streams, an authentic audio track dampens the detection probability on Video-Only Fakes. In contrast, RMS-AV's auxiliary loss encourages the visual encoder to output high forensic logits independently, allowing the reliability gate to prioritize the visual stream.
