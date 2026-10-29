@@ -3,11 +3,18 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# PyTorch checkpoints (> 100MB exceeds GitHub push limit)
-checkpoints/*.pth
+# PyTorch checkpoints (allow lightweight deployment models for demonstration)
 checkpoints/*.pt
-*.pth
+checkpoints/*latest.pth
+checkpoints/test_deploy.pth
 *.pt
+
+# Allow compact deployment checkpoints (<50MB) for portable laptop demonstration
+!checkpoints/pilot_audio_best.pth
+!checkpoints/pilot_video_best.pth
+!checkpoints/pilot_fusion_best.pth
+!checkpoints/pilot_rmsav_best.pth
+!checkpoints/lavdf_rmsav_best.pth
 
 # Matplotlib cache
 results/.matplotlib/
