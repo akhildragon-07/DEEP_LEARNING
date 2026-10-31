@@ -49,6 +49,8 @@ class LAVDFTrainer:
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
         aux_weight: float = 0.20,
+        fci_weight: float = 0.15,
+        grad_accum_steps: int = 1,
         patience: int = 5,
         num_workers: int = 4,
         use_amp: bool = True,
@@ -69,6 +71,8 @@ class LAVDFTrainer:
         self.lr = lr
         self.weight_decay = weight_decay
         self.aux_weight = aux_weight
+        self.fci_weight = fci_weight
+        self.grad_accum_steps = max(1, grad_accum_steps)
         self.patience = patience
         self.num_workers = num_workers
         self.use_amp = use_amp and torch.cuda.is_available()
@@ -99,17 +103,27 @@ class LAVDFTrainer:
 
         print(f"[{self.mode.upper()} Trainer] Initializing on device: {self.device} (AMP={self.use_amp})")
 
-        # Build model
-        self.model = build_lavdf_model(mode=self.mode, dim=self.dim, pretrained=self.pretrained_visual)
+        # Build model with TSA and CM-FCI enabled
+        self.model = build_lavdf_model(
+            mode=self.mode,
+            dim=self.dim,
+            pretrained=self.pretrained_visual,
+            use_tsa=True,
+            use_fci=True,
+        )
         self.model.to(self.device)
         tot_p, trn_p = count_parameters(self.model)
         print(f"[{self.mode.upper()} Model] Total params: {tot_p:,} | Trainable: {trn_p:,}")
 
-        # Loss function & Optimizer
+        # Loss function, Optimizer, and Cosine Annealing Scheduler
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=self.epochs, eta_min=1e-6
+        )
+
         if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
             try:
                 self.scaler = torch.amp.GradScaler(self.device.type, init_scale=1024.0, enabled=self.use_amp)
@@ -136,6 +150,8 @@ class LAVDFTrainer:
             "val_acc": [],
             "val_macro_f1": [],
             "val_auc": [],
+            "val_incoherence_real": [],
+            "val_incoherence_fake": [],
             "lr": [],
         }
 
@@ -144,6 +160,8 @@ class LAVDFTrainer:
         total_loss = 0.0
         num_batches = len(self.train_loader)
         t_start = time.time()
+
+        self.optimizer.zero_grad()
 
         for step, batch in enumerate(self.train_loader, 1):
             # Send tensors to device
@@ -156,8 +174,6 @@ class LAVDFTrainer:
             targets = batch["label"].to(self.device, non_blocking=True)
             targets_v = batch["label_v"].to(self.device, non_blocking=True)
             targets_a = batch["label_a"].to(self.device, non_blocking=True)
-
-            self.optimizer.zero_grad()
 
             autocast_ctx = (
                 torch.amp.autocast("cuda", enabled=self.use_amp)
@@ -172,15 +188,33 @@ class LAVDFTrainer:
                     loss_joint = self.bce_loss(logits_joint, targets)
                     loss_v = self.bce_loss(out["logit_v"], targets_v)
                     loss_a = self.bce_loss(out["logit_a"], targets_a)
-                    loss = loss_joint + self.aux_weight * (loss_v + loss_a)
+                    loss_aux = self.aux_weight * (loss_v + loss_a)
+
+                    # Supervised Cross-Modal Forensic Contrastive Incoherence (CM-FCI) Loss
+                    if (
+                        out.get("z_v") is not None
+                        and out.get("z_a") is not None
+                        and hasattr(self.model, "fci_projector")
+                        and self.model.fci_projector is not None
+                    ):
+                        loss_fci = self.model.fci_projector.compute_fci_loss(out["z_v"], out["z_a"], targets)
+                    else:
+                        loss_fci = torch.tensor(0.0, device=self.device)
+
+                    loss = loss_joint + loss_aux + self.fci_weight * loss_fci
                 else:
                     loss = self.bce_loss(logits_joint, targets)
 
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+                loss_scaled = loss / self.grad_accum_steps
+
+            self.scaler.scale(loss_scaled).backward()
+
+            if step % self.grad_accum_steps == 0 or step == num_batches:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
 
             total_loss += loss.item()
 
@@ -199,11 +233,13 @@ class LAVDFTrainer:
         return total_loss / max(num_batches, 1)
 
     @torch.no_grad()
-    def validate(self) -> Tuple[float, float, float, float]:
+    def validate(self) -> Tuple[float, float, float, float, float, float]:
         self.model.eval()
         total_loss = 0.0
         all_targets = []
         all_probs = []
+        inc_real_list = []
+        inc_fake_list = []
         num_batches = len(self.val_loader)
 
         for step, batch in enumerate(self.val_loader, 1):
@@ -227,8 +263,17 @@ class LAVDFTrainer:
 
             probs = torch.sigmoid(logits).cpu().numpy()
             total_loss += loss.item()
-            all_targets.extend(targets.cpu().numpy().tolist())
+            targets_np = targets.cpu().numpy()
+            all_targets.extend(targets_np.tolist())
             all_probs.extend(probs.tolist())
+
+            if out.get("incoherence") is not None:
+                inc_vals = out["incoherence"].squeeze(-1).cpu().numpy()
+                for b_i in range(len(targets_np)):
+                    if targets_np[b_i] == 1:
+                        inc_fake_list.append(float(inc_vals[b_i]))
+                    else:
+                        inc_real_list.append(float(inc_vals[b_i]))
 
             if step % 50 == 0 or step == num_batches:
                 print(f"  [Validating] Batch {step}/{num_batches} ({step/num_batches*100:.1f}%)")
@@ -250,7 +295,10 @@ class LAVDFTrainer:
         except Exception:
             auc = 0.5
 
-        return val_loss, acc, macro_f1, auc
+        avg_inc_real = float(np.mean(inc_real_list)) if inc_real_list else 0.0
+        avg_inc_fake = float(np.mean(inc_fake_list)) if inc_fake_list else 0.0
+
+        return val_loss, acc, macro_f1, auc, avg_inc_real, avg_inc_fake
 
     def _atomic_save(self, state: Dict[str, Any], target_path: str) -> None:
         """Saves checkpoint atomically using a temp file and syncs to Drive if available."""
@@ -333,7 +381,8 @@ class LAVDFTrainer:
             self._atomic_save(interim_state, latest_ckpt_path)
 
             print(f"  [Epoch {ep}] Running validation to calculate Macro-F1 & AUROC...")
-            val_loss, val_acc, val_f1, val_auc = self.validate()
+            val_loss, val_acc, val_f1, val_auc, inc_real, inc_fake = self.validate()
+            self.scheduler.step()
             elapsed = time.time() - t0
 
             # Primary validation selection metric: Macro-F1 (or AUC)
@@ -345,6 +394,8 @@ class LAVDFTrainer:
             self.history["val_acc"].append(round(val_acc, 4))
             self.history["val_macro_f1"].append(round(val_f1, 4))
             self.history["val_auc"].append(round(val_auc, 4))
+            self.history["val_incoherence_real"].append(round(inc_real, 4))
+            self.history["val_incoherence_fake"].append(round(inc_fake, 4))
             self.history["lr"].append(self.optimizer.param_groups[0]["lr"])
 
             print(
@@ -353,7 +404,8 @@ class LAVDFTrainer:
                 f"Val Loss: {val_loss:.4f} | "
                 f"Val Acc: {val_acc*100:.2f}% | "
                 f"Val Macro-F1: {val_f1*100:.2f}% | "
-                f"Val AUC: {val_auc:.4f} "
+                f"Val AUC: {val_auc:.4f} | "
+                f"FCI Discordance (Real/Fake): {inc_real:.3f}/{inc_fake:.3f} "
                 f"({elapsed:.1f}s)"
             )
 
@@ -418,6 +470,8 @@ def main():
     parser.add_argument("--lr", "--learning_rate", type=float, default=1e-4, dest="lr")
     parser.add_argument("--dim", type=int, default=256)
     parser.add_argument("--aux_weight", type=float, default=0.20)
+    parser.add_argument("--fci_weight", type=float, default=0.15, help="Weight for Cross-Modal Contrastive Incoherence Loss")
+    parser.add_argument("--grad_accum_steps", type=int, default=1, help="Gradient accumulation steps")
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints_lavdf")
@@ -477,6 +531,8 @@ def main():
         epochs=args.epochs,
         lr=args.lr,
         aux_weight=args.aux_weight,
+        fci_weight=args.fci_weight,
+        grad_accum_steps=args.grad_accum_steps,
         patience=args.patience,
         save_dir=args.save_dir,
         log_dir=args.log_dir,

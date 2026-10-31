@@ -122,12 +122,22 @@ def run_smoke_test(
         loss_joint = bce(logit_av, targets)
         loss_v = bce(out["logit_v"], targets_v)
         loss_a = bce(out["logit_a"], targets_a)
-        total_loss = loss_joint + 0.20 * (loss_v + loss_a)
+        loss_aux = 0.20 * (loss_v + loss_a)
+        if out.get("z_v") is not None and out.get("z_a") is not None and hasattr(model, "fci_projector") and model.fci_projector is not None:
+            loss_fci = model.fci_projector.compute_fci_loss(out["z_v"], out["z_a"], targets)
+        else:
+            loss_fci = torch.tensor(0.0, device=device)
+        total_loss = loss_joint + loss_aux + 0.15 * loss_fci
 
     gate = out.get("gate")
+    incoherence = out.get("incoherence")
     print(f"  [PASS] Check 4: Forward pass succeeded! Logit AV shape = {tuple(logit_av.shape)}")
     if gate is not None:
         print(f"                  Reliability Gate weights [B, 2]:\n{gate.cpu().detach().numpy()}")
+    if incoherence is not None:
+        print(f"                  CM-FCI Incoherence scores [B, 1]:\n{incoherence.cpu().detach().numpy().round(4)}")
+    if out.get("temporal_weights") is not None:
+        print(f"                  TSA Temporal Saliency weights [B, T]:\n{out['temporal_weights'].cpu().detach().numpy().round(3)}")
     assert logit_av.shape == (len(labels),), f"Mismatched logit shape: {logit_av.shape}"
 
     # 5: Finite Loss
