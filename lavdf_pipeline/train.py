@@ -59,6 +59,7 @@ class LAVDFTrainer:
         checkpoint_prefix: str = "lavdf_",
         drive_backup: Optional[str] = None,
         limit_samples: Optional[int] = None,
+        save_interval_steps: int = 500,
         device: Optional[str] = None,
     ):
         self.mode = mode.lower()
@@ -80,6 +81,7 @@ class LAVDFTrainer:
         self.log_dir = log_dir
         self.checkpoint_prefix = checkpoint_prefix
         self.limit_samples = limit_samples
+        self.save_interval_steps = max(0, save_interval_steps)
 
         # Drive backup directory auto-detection or explicit configuration
         if drive_backup:
@@ -155,7 +157,12 @@ class LAVDFTrainer:
             "lr": [],
         }
 
-    def train_epoch(self, epoch: int = 1) -> float:
+    def train_epoch(
+        self,
+        epoch: int = 1,
+        latest_ckpt_path: Optional[str] = None,
+        best_val_metric: float = -1.0,
+    ) -> float:
         self.model.train()
         total_loss = 0.0
         num_batches = len(self.train_loader)
@@ -229,6 +236,30 @@ class LAVDFTrainer:
                     f"({step/num_batches*100:.1f}%)] Loss: {running_loss:.4f} | "
                     f"Speed: {speed:.1f} b/s | ETA: {rem_m}m {rem_s:02d}s"
                 )
+
+            # Fail-safe periodic mid-epoch checkpoint save (prevents losing progress if kernel dies mid-epoch)
+            if (
+                latest_ckpt_path
+                and self.save_interval_steps > 0
+                and (step % self.save_interval_steps == 0)
+                and step < num_batches
+            ):
+                interim_step_state = {
+                    "epoch": epoch,
+                    "step": step,
+                    "total_steps": num_batches,
+                    "is_epoch_complete": False,
+                    "mode": self.mode,
+                    "best_metric": best_val_metric,
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "scheduler_state_dict": self.scheduler.state_dict(),
+                    "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
+                    "history": self.history,
+                    "config": {"dim": self.dim, "mode": self.mode, "aux_weight": self.aux_weight},
+                }
+                self._atomic_save(interim_step_state, latest_ckpt_path)
+                print(f"  --> [Fail-Safe Checkpoint @ Step {step}/{num_batches}] Saved to {os.path.basename(latest_ckpt_path)}")
 
         return total_loss / max(num_batches, 1)
 
@@ -327,7 +358,26 @@ class LAVDFTrainer:
         best_ckpt_path = os.path.join(self.save_dir, f"{self.checkpoint_prefix}{self.mode}_best.pth")
         latest_ckpt_path = os.path.join(self.save_dir, f"{self.checkpoint_prefix}{self.mode}_latest.pth")
 
-        # Fallback: Restore from Google Drive backup if local dir was reset
+        # Fallback 1: Search Kaggle input datasets (/kaggle/input/**/lavdf_*_latest.pth)
+        if resume and not os.path.exists(latest_ckpt_path) and os.path.exists("/kaggle/input"):
+            print(f"[{self.mode.upper()} Resume] Scanning Kaggle input datasets for previous run checkpoints...")
+            target_names = [
+                f"{self.checkpoint_prefix}{self.mode}_latest.pth",
+                f"{self.checkpoint_prefix}{self.mode}_best.pth",
+                f"{self.checkpoint_prefix}{self.mode}_emergency_crash.pth",
+            ]
+            for root, dirs, files in os.walk("/kaggle/input"):
+                for fn in target_names:
+                    if fn in files:
+                        found_path = os.path.join(root, fn)
+                        import shutil
+                        print(f"[{self.mode.upper()} Resume] Found previous Kaggle checkpoint: {found_path}")
+                        shutil.copy2(found_path, latest_ckpt_path)
+                        break
+                if os.path.exists(latest_ckpt_path):
+                    break
+
+        # Fallback 2: Restore from Google Drive backup if local dir was reset
         if resume and not os.path.exists(latest_ckpt_path) and self.drive_backup_dir:
             drive_latest = os.path.join(self.drive_backup_dir, os.path.basename(latest_ckpt_path))
             if os.path.exists(drive_latest):
@@ -348,13 +398,26 @@ class LAVDFTrainer:
                     ckpt = torch.load(latest_ckpt_path, map_location=self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-                if "scaler_state_dict" in ckpt and self.use_amp:
+                if "scaler_state_dict" in ckpt and self.use_amp and self.scaler:
                     self.scaler.load_state_dict(ckpt["scaler_state_dict"])
-                start_epoch = ckpt.get("epoch", 0) + 1
+                if "scheduler_state_dict" in ckpt and hasattr(self, "scheduler"):
+                    try:
+                        self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+                    except Exception:
+                        pass
+                
+                # Check whether previous run completed the epoch or stopped mid-way
+                is_complete = ckpt.get("is_epoch_complete", True)
+                if is_complete:
+                    start_epoch = ckpt.get("epoch", 0) + 1
+                else:
+                    start_epoch = ckpt.get("epoch", 1)
+                    print(f"[{self.mode.upper()} Resume] Resuming interrupted epoch {start_epoch}...")
+
                 best_val_metric = ckpt.get("best_metric", -1.0)
                 best_epoch = ckpt.get("epoch", 0)
                 self.history = ckpt.get("history", self.history)
-                print(f"[{self.mode.upper()} Resume] Successfully restored epoch {start_epoch - 1} (best metric: {best_val_metric:.4f})")
+                print(f"[{self.mode.upper()} Resume] Successfully restored epoch {ckpt.get('epoch')} (best metric: {best_val_metric:.4f})")
             except Exception as e:
                 print(f"[!] Warning: Failed to resume from {latest_ckpt_path}: {e}. Starting fresh.")
                 start_epoch = 1
@@ -363,82 +426,118 @@ class LAVDFTrainer:
         print(f"STARTING TRAINING: {self.mode.upper()} (Epochs {start_epoch} to {self.epochs})")
         print(f"{'='*75}")
 
-        for ep in range(start_epoch, self.epochs + 1):
-            t0 = time.time()
-            trn_loss = self.train_epoch(ep)
+        current_ep = start_epoch
+        try:
+            for ep in range(start_epoch, self.epochs + 1):
+                current_ep = ep
+                t0 = time.time()
+                trn_loss = self.train_epoch(
+                    ep,
+                    latest_ckpt_path=latest_ckpt_path,
+                    best_val_metric=best_val_metric,
+                )
 
-            # Instantly persist latest checkpoint so training progress is never lost
-            interim_state = {
-                "epoch": ep,
+                # Instantly persist latest checkpoint so training progress is never lost
+                interim_state = {
+                    "epoch": ep,
+                    "is_epoch_complete": True,
+                    "mode": self.mode,
+                    "best_metric": best_val_metric,
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "scheduler_state_dict": self.scheduler.state_dict(),
+                    "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
+                    "history": self.history,
+                    "config": {"dim": self.dim, "mode": self.mode},
+                }
+                self._atomic_save(interim_state, latest_ckpt_path)
+
+                print(f"  [Epoch {ep}] Running validation to calculate Macro-F1 & AUROC...")
+                val_loss, val_acc, val_f1, val_auc, inc_real, inc_fake = self.validate()
+                self.scheduler.step()
+                elapsed = time.time() - t0
+
+                # Primary validation selection metric: Macro-F1 (or AUC)
+                val_metric = val_f1
+
+                self.history["epoch"].append(ep)
+                self.history["train_loss"].append(round(trn_loss, 4))
+                self.history["val_loss"].append(round(val_loss, 4))
+                self.history["val_acc"].append(round(val_acc, 4))
+                self.history["val_macro_f1"].append(round(val_f1, 4))
+                self.history["val_auc"].append(round(val_auc, 4))
+                self.history["val_incoherence_real"].append(round(inc_real, 4))
+                self.history["val_incoherence_fake"].append(round(inc_fake, 4))
+                self.history["lr"].append(self.optimizer.param_groups[0]["lr"])
+
+                print(
+                    f"Epoch [{ep:02d}/{self.epochs:02d}] "
+                    f"Train Loss: {trn_loss:.4f} | "
+                    f"Val Loss: {val_loss:.4f} | "
+                    f"Val Acc: {val_acc*100:.2f}% | "
+                    f"Val Macro-F1: {val_f1*100:.2f}% | "
+                    f"Val AUC: {val_auc:.4f} | "
+                    f"FCI Discordance (Real/Fake): {inc_real:.3f}/{inc_fake:.3f} "
+                    f"({elapsed:.1f}s)"
+                )
+
+                # Checkpoint saving (selection strictly on validation)
+                ckpt_state = {
+                    "epoch": ep,
+                    "is_epoch_complete": True,
+                    "mode": self.mode,
+                    "best_metric": val_metric,
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "scheduler_state_dict": self.scheduler.state_dict(),
+                    "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
+                    "config": {
+                        "mode": self.mode,
+                        "dim": self.dim,
+                        "lr": self.lr,
+                        "batch_size": self.batch_size,
+                        "aux_weight": self.aux_weight,
+                    },
+                    "history": self.history,
+                }
+                self._atomic_save(ckpt_state, latest_ckpt_path)
+
+                if val_metric > best_val_metric:
+                    best_val_metric = val_metric
+                    best_epoch = ep
+                    patience_counter = 0
+                    self._atomic_save(ckpt_state, best_ckpt_path)
+                    print(f"  --> Saved new best checkpoint to: {os.path.basename(best_ckpt_path)} (Macro-F1: {val_f1*100:.2f}%)")
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.patience:
+                        print(f"\n[Early Stopping Triggered] No validation improvement in {self.patience} epochs. Halting.")
+                        break
+        except (Exception, KeyboardInterrupt) as exc:
+            print(f"\n{'!'*75}")
+            print(f"[FAIL-SAFE TRIGGERED] Interruption or error caught: {type(exc).__name__}: {exc}")
+            print(f"[FAIL-SAFE TRIGGERED] Saving emergency crash checkpoint immediately to disk...")
+            print(f"{'!'*75}")
+            emergency_state = {
+                "epoch": current_ep,
+                "is_epoch_complete": False,
                 "mode": self.mode,
                 "best_metric": best_val_metric,
                 "model_state_dict": self.model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict(),
                 "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
                 "history": self.history,
                 "config": {"dim": self.dim, "mode": self.mode},
+                "crash_reason": f"{type(exc).__name__}: {str(exc)}",
             }
-            self._atomic_save(interim_state, latest_ckpt_path)
-
-            print(f"  [Epoch {ep}] Running validation to calculate Macro-F1 & AUROC...")
-            val_loss, val_acc, val_f1, val_auc, inc_real, inc_fake = self.validate()
-            self.scheduler.step()
-            elapsed = time.time() - t0
-
-            # Primary validation selection metric: Macro-F1 (or AUC)
-            val_metric = val_f1
-
-            self.history["epoch"].append(ep)
-            self.history["train_loss"].append(round(trn_loss, 4))
-            self.history["val_loss"].append(round(val_loss, 4))
-            self.history["val_acc"].append(round(val_acc, 4))
-            self.history["val_macro_f1"].append(round(val_f1, 4))
-            self.history["val_auc"].append(round(val_auc, 4))
-            self.history["val_incoherence_real"].append(round(inc_real, 4))
-            self.history["val_incoherence_fake"].append(round(inc_fake, 4))
-            self.history["lr"].append(self.optimizer.param_groups[0]["lr"])
-
-            print(
-                f"Epoch [{ep:02d}/{self.epochs:02d}] "
-                f"Train Loss: {trn_loss:.4f} | "
-                f"Val Loss: {val_loss:.4f} | "
-                f"Val Acc: {val_acc*100:.2f}% | "
-                f"Val Macro-F1: {val_f1*100:.2f}% | "
-                f"Val AUC: {val_auc:.4f} | "
-                f"FCI Discordance (Real/Fake): {inc_real:.3f}/{inc_fake:.3f} "
-                f"({elapsed:.1f}s)"
-            )
-
-            # Checkpoint saving (selection strictly on validation)
-            ckpt_state = {
-                "epoch": ep,
-                "mode": self.mode,
-                "best_metric": val_metric,
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
-                "config": {
-                    "mode": self.mode,
-                    "dim": self.dim,
-                    "lr": self.lr,
-                    "batch_size": self.batch_size,
-                    "aux_weight": self.aux_weight,
-                },
-                "history": self.history,
-            }
-            self._atomic_save(ckpt_state, latest_ckpt_path)
-
-            if val_metric > best_val_metric:
-                best_val_metric = val_metric
-                best_epoch = ep
-                patience_counter = 0
-                self._atomic_save(ckpt_state, best_ckpt_path)
-                print(f"  --> Saved new best checkpoint to: {os.path.basename(best_ckpt_path)} (Macro-F1: {val_f1*100:.2f}%)")
-            else:
-                patience_counter += 1
-                if patience_counter >= self.patience:
-                    print(f"\n[Early Stopping Triggered] No validation improvement in {self.patience} epochs. Halting.")
-                    break
+            emergency_path = os.path.join(self.save_dir, f"{self.checkpoint_prefix}{self.mode}_emergency_crash.pth")
+            self._atomic_save(emergency_state, emergency_path)
+            self._atomic_save(emergency_state, latest_ckpt_path)
+            print(f"  --> Emergency checkpoint safely preserved at: {emergency_path}")
+            print(f"  --> Latest checkpoint updated at: {latest_ckpt_path}")
+            print(f"[Resume Instructions] Simply re-run training with --resume to continue from epoch {current_ep}.\n")
+            raise exc
 
         # Save training history files
         csv_history_path = os.path.join(self.log_dir, f"{self.checkpoint_prefix}{self.mode}_history.csv")
@@ -476,6 +575,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints_lavdf")
     parser.add_argument("--log_dir", type=str, default="results_lavdf")
+    parser.add_argument("--save_interval_steps", type=int, default=500, help="Save interim checkpoint every N steps to prevent loss on crash/timeout")
     parser.add_argument("--drive_backup", type=str, default=None, help="Directory on Google Drive to sync checkpoints")
     parser.add_argument("--limit_samples", type=int, default=None)
     parser.add_argument("--resume", action="store_true", default=True, help="Automatically resume from latest checkpoint if available.")
@@ -538,6 +638,7 @@ def main():
         log_dir=args.log_dir,
         drive_backup=args.drive_backup,
         limit_samples=args.limit_samples,
+        save_interval_steps=args.save_interval_steps,
     )
     trainer.fit(resume=args.resume)
 
