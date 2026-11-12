@@ -363,8 +363,10 @@ def main():
             return
         model = evaluator.load_checkpoint(args.checkpoint, mode=args.mode)
         conditions = ["clean", "missing_video", "missing_audio"] if args.stress_test else ["clean"]
+        single_results = []
         for cond in conditions:
             res = evaluator.evaluate_model(model, mode=args.mode, condition=cond)
+            single_results.append(res)
             print(
                 f"  [{args.mode.upper():<7} | {cond:<14}] "
                 f"Acc: {res['accuracy']*100:.2f}% | "
@@ -374,6 +376,13 @@ def main():
             )
             for cat, acc in res.get("per_category_accuracy", {}).items():
                 print(f"    - {cat:<24}: {acc*100:.2f}%")
+        df = pd.DataFrame(single_results)
+        csv_path = os.path.join(args.output_dir, "lavdf_benchmark_comparison.csv")
+        df.to_csv(csv_path, index=False)
+        json_path = os.path.join(args.output_dir, "lavdf_benchmark_results.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(single_results, f, indent=2)
+        print(f"\nSaved evaluation outputs to:\n  - CSV: {csv_path}\n  - JSON: {json_path}")
         return
 
     ckpt_map = {

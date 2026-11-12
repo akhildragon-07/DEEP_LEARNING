@@ -159,14 +159,14 @@ cells = [
         "metadata": {},
         "outputs": [],
         "source": [
-            "# Training Hyperparameters (Transfer Learning + Deadline-Safe Mode)\n",
+            "# Training Hyperparameters (Express 11 PM Deadline-Safe Mode: ~1.5 - 2 Hrs Total)\n",
             "EPOCHS = 5                  # ImageNet Transfer Learning converges rapidly in 4-5 epochs\n",
-            "BATCH_SIZE = 32             # Larger batch size for fast T4/P100 GPU throughput\n",
+            "BATCH_SIZE = 32             # Fast T4/P100 GPU throughput (250 batches/epoch)\n",
             "GRAD_ACCUM = 1              # Effective batch size = 32\n",
             "LEARNING_RATE = 1e-4\n",
-            "SAVE_INTERVAL_STEPS = 250   # Fail-safe save every 250 batches (~5 mins)\n",
-            "MAX_HOURS = 10.0            # Stops cleanly before Kaggle 12h timeout so Outputs ALWAYS save\n",
-            "LIMIT_SAMPLES = 20000       # Stratified 20,000 clips (~2.5-3.5 hrs total!). Set to None for full 78,703 clips.\n",
+            "SAVE_INTERVAL_STEPS = 100   # Fail-safe save every 100 batches (~3-4 mins)\n",
+            "MAX_HOURS = 3.5             # Stops gracefully well before deadline so Outputs ALWAYS save\n",
+            "LIMIT_SAMPLES = 8000        # Stratified 8,000 clips (~15-20 mins/epoch -> finishes ~8:30-9:00 PM!)\n",
             "\n",
             "cmd = [\n",
             "    \"python -m lavdf_pipeline.train\",\n",
@@ -201,8 +201,8 @@ cells = [
         "cell_type": "markdown",
         "metadata": {},
         "source": [
-            "## 6. Full Held-Out Evaluation & Modality-Drop Stress Testing\n",
-            "*Evaluates the best checkpoint on the official 26,100 held-out test split under Clean, Missing-Video, and Missing-Audio conditions.*"
+            "## 6. Held-Out Evaluation & Modality-Drop Stress Testing (~6 Mins)\n",
+            "*Evaluates the best checkpoint on 2,000 stratified held-out test clips under Clean, Missing-Video, and Missing-Audio conditions.*"
         ]
     },
     {
@@ -211,11 +211,21 @@ cells = [
         "metadata": {},
         "outputs": [],
         "source": [
-            "!python -m lavdf_pipeline.evaluate \\\n",
-            "    --mode rmsav \\\n",
-            "    --checkpoint /kaggle/working/checkpoints_lavdf/lavdf_rmsav_best.pth \\\n",
-            "    --stress_test \\\n",
-            "    --save_dir /kaggle/working/results_lavdf"
+            "eval_cmd = [\n",
+            "    \"python -m lavdf_pipeline.evaluate\",\n",
+            "    \"--mode rmsav\",\n",
+            "    \"--checkpoint /kaggle/working/checkpoints_lavdf/lavdf_rmsav_best.pth\",\n",
+            "    \"--stress_test\",\n",
+            "    \"--batch_size 32\",\n",
+            "    \"--limit_samples 2000\",\n",
+            "    \"--output_dir /kaggle/working/results_lavdf\",\n",
+            "]\n",
+            "if meta_found:\n",
+            "    eval_cmd.append(f'--metadata_path \"{meta_found}\"')\n",
+            "    eval_cmd.append(f'--media_root \"{media_root}\"')\n",
+            "full_eval = \" \".join(eval_cmd)\n",
+            "print(\"Running Evaluation:\", full_eval)\n",
+            "!{full_eval}"
         ]
     },
     {
@@ -254,9 +264,22 @@ cells = [
         "metadata": {},
         "outputs": [],
         "source": [
-            "!python prepare_deployable_checkpoints.py\n",
+            "import torch, os\n",
+            "best_path = \"/kaggle/working/checkpoints_lavdf/lavdf_rmsav_best.pth\"\n",
+            "deploy_path = \"/kaggle/working/checkpoints_lavdf/lavdf_rmsav_deploy.pth\"\n",
+            "if os.path.exists(best_path):\n",
+            "    ckpt = torch.load(best_path, map_location=\"cpu\", weights_only=False)\n",
+            "    torch.save({\n",
+            "        \"model_state_dict\": ckpt[\"model_state_dict\"],\n",
+            "        \"config\": ckpt.get(\"config\", {\"dim\": 256, \"mode\": \"rmsav\"}),\n",
+            "        \"epoch\": ckpt.get(\"epoch\", 1),\n",
+            "        \"best_metric\": ckpt.get(\"best_metric\", 0.0),\n",
+            "    }, deploy_path)\n",
+            "    print(f\"Compact deployable checkpoint created: {deploy_path} ({os.path.getsize(deploy_path)/(1024*1024):.1f} MB)\")\n",
+            "\n",
             "!zip -r /kaggle/working/RMSAV_Trained_Models_and_Results.zip \\\n",
-            "    /kaggle/working/checkpoints_lavdf \\\n",
+            "    /kaggle/working/checkpoints_lavdf/lavdf_rmsav_deploy.pth \\\n",
+            "    /kaggle/working/checkpoints_lavdf/lavdf_rmsav_best.pth \\\n",
             "    /kaggle/working/results_lavdf \\\n",
             "    /kaggle/working/paper/artifacts\n",
             "print(\"\\n[DONE] Package ready for 1-click download at: /kaggle/working/RMSAV_Trained_Models_and_Results.zip\")"
