@@ -43,7 +43,7 @@ class LAVDFTrainer:
         metadata_path: str = "metadata.min.json",
         media_root: str = "data",
         dim: int = 256,
-        pretrained_visual: bool = False,
+        pretrained_visual: bool = True,
         batch_size: int = 16,
         epochs: int = 20,
         lr: float = 1e-4,
@@ -668,6 +668,8 @@ def main():
     parser.add_argument("--max_hours", type=float, default=None, help="Maximum runtime in hours before graceful checkpoint save and clean exit (e.g., 10.0 on Kaggle)")
     parser.add_argument("--drive_backup", type=str, default=None, help="Directory on Google Drive to sync checkpoints")
     parser.add_argument("--limit_samples", type=int, default=None)
+    parser.add_argument("--pretrained", action="store_true", default=True, help="Initialize visual ResNet18 with ImageNet pretrained weights for rapid transfer learning")
+    parser.add_argument("--no_pretrained", dest="pretrained", action="store_false")
     parser.add_argument("--resume", action="store_true", default=True, help="Automatically resume from latest checkpoint if available.")
     parser.add_argument("--no_resume", dest="resume", action="store_false")
     args, unknown = parser.parse_known_args()
@@ -717,6 +719,7 @@ def main():
         metadata_path=meta_path,
         media_root=media_root,
         dim=args.dim,
+        pretrained_visual=args.pretrained,
         batch_size=args.batch_size,
         epochs=args.epochs,
         lr=args.lr,

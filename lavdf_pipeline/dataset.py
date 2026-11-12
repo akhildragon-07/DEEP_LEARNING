@@ -82,8 +82,36 @@ class LAVDFDataset(Dataset):
                     continue
             filtered.append(r)
 
-        if limit_samples is not None and limit_samples > 0:
-            filtered = filtered[:limit_samples]
+        if limit_samples is not None and limit_samples > 0 and len(filtered) > limit_samples:
+            # Deterministic stratified sampling across all 4 LAV-DF categories
+            import random
+            rng = random.Random(42)
+            buckets: Dict[str, List[Dict[str, Any]]] = {
+                "real": [],
+                "audio_only": [],
+                "video_only": [],
+                "both_fake": [],
+            }
+            for r in filtered:
+                mv = r.get("modify_video", False)
+                ma = r.get("modify_audio", False)
+                if not mv and not ma:
+                    buckets["real"].append(r)
+                elif ma and not mv:
+                    buckets["audio_only"].append(r)
+                elif mv and not ma:
+                    buckets["video_only"].append(r)
+                else:
+                    buckets["both_fake"].append(r)
+
+            sampled = []
+            total_avail = len(filtered)
+            for b_list in buckets.values():
+                rng.shuffle(b_list)
+                take = max(1, int(round(len(b_list) / total_avail * limit_samples))) if len(b_list) > 0 else 0
+                sampled.extend(b_list[:take])
+            rng.shuffle(sampled)
+            filtered = sampled[:limit_samples]
 
         self.records = filtered
         print(f"[LAVDFDataset] Loaded {len(self.records):,} samples for split '{self.split}' (training_mode={self.is_train})")
