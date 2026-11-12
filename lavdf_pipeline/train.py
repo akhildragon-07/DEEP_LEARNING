@@ -59,7 +59,8 @@ class LAVDFTrainer:
         checkpoint_prefix: str = "lavdf_",
         drive_backup: Optional[str] = None,
         limit_samples: Optional[int] = None,
-        save_interval_steps: int = 500,
+        save_interval_steps: int = 250,
+        max_hours: Optional[float] = None,
         device: Optional[str] = None,
     ):
         self.mode = mode.lower()
@@ -82,6 +83,8 @@ class LAVDFTrainer:
         self.checkpoint_prefix = checkpoint_prefix
         self.limit_samples = limit_samples
         self.save_interval_steps = max(0, save_interval_steps)
+        self.max_hours = max_hours
+        self.training_start_time = time.time()
 
         # Drive backup directory auto-detection or explicit configuration
         if drive_backup:
@@ -162,15 +165,40 @@ class LAVDFTrainer:
         epoch: int = 1,
         latest_ckpt_path: Optional[str] = None,
         best_val_metric: float = -1.0,
-    ) -> float:
+        resume_step: int = 0,
+    ) -> Tuple[float, bool]:
+        """Runs one training epoch. Returns (avg_loss, time_budget_reached)."""
         self.model.train()
         total_loss = 0.0
-        num_batches = len(self.train_loader)
         t_start = time.time()
+        self.last_completed_step = resume_step
+
+        # If resuming mid-epoch, fast-forward by slicing remaining samples
+        active_loader = self.train_loader
+        total_batches = len(self.train_loader)
+        if resume_step > 0 and resume_step < total_batches:
+            offset = resume_step * self.batch_size
+            ds = self.train_loader.dataset
+            if offset < len(ds):
+                sub_ds = torch.utils.data.Subset(ds, range(offset, len(ds)))
+                active_loader = torch.utils.data.DataLoader(
+                    sub_ds,
+                    batch_size=self.batch_size,
+                    shuffle=True,
+                    num_workers=self.num_workers,
+                    pin_memory=True,
+                    drop_last=False,
+                )
+                print(f"  [Fast-Forward Resume] Skipping {resume_step} completed batches ({offset:,} samples). Remaining: {len(active_loader)} batches.")
 
         self.optimizer.zero_grad()
+        steps_run = 0
 
-        for step, batch in enumerate(self.train_loader, 1):
+        for idx, batch in enumerate(active_loader, 1):
+            step = resume_step + idx
+            steps_run = idx
+            self.last_completed_step = step
+
             # Send tensors to device
             batch_dev = {
                 "video": batch["video"].to(self.device, non_blocking=True),
@@ -216,7 +244,7 @@ class LAVDFTrainer:
 
             self.scaler.scale(loss_scaled).backward()
 
-            if step % self.grad_accum_steps == 0 or step == num_batches:
+            if idx % self.grad_accum_steps == 0 or idx == len(active_loader):
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
                 self.scaler.step(self.optimizer)
@@ -225,15 +253,15 @@ class LAVDFTrainer:
 
             total_loss += loss.item()
 
-            if step % 50 == 0 or step == num_batches:
+            if step % 50 == 0 or idx == len(active_loader):
                 elapsed = time.time() - t_start
-                speed = step / max(elapsed, 1e-4)
-                remaining = (num_batches - step) / max(speed, 1e-4)
+                speed = idx / max(elapsed, 1e-4)
+                remaining = (len(active_loader) - idx) / max(speed, 1e-4)
                 rem_m, rem_s = divmod(int(remaining), 60)
-                running_loss = total_loss / step
+                running_loss = total_loss / idx
                 print(
-                    f"  [Epoch {epoch}/{self.epochs} | Batch {step}/{num_batches} "
-                    f"({step/num_batches*100:.1f}%)] Loss: {running_loss:.4f} | "
+                    f"  [Epoch {epoch}/{self.epochs} | Batch {step}/{total_batches} "
+                    f"({step/total_batches*100:.1f}%)] Loss: {running_loss:.4f} | "
                     f"Speed: {speed:.1f} b/s | ETA: {rem_m}m {rem_s:02d}s"
                 )
 
@@ -242,12 +270,12 @@ class LAVDFTrainer:
                 latest_ckpt_path
                 and self.save_interval_steps > 0
                 and (step % self.save_interval_steps == 0)
-                and step < num_batches
+                and idx < len(active_loader)
             ):
                 interim_step_state = {
                     "epoch": epoch,
                     "step": step,
-                    "total_steps": num_batches,
+                    "total_steps": total_batches,
                     "is_epoch_complete": False,
                     "mode": self.mode,
                     "best_metric": best_val_metric,
@@ -259,9 +287,17 @@ class LAVDFTrainer:
                     "config": {"dim": self.dim, "mode": self.mode, "aux_weight": self.aux_weight},
                 }
                 self._atomic_save(interim_step_state, latest_ckpt_path)
-                print(f"  --> [Fail-Safe Checkpoint @ Step {step}/{num_batches}] Saved to {os.path.basename(latest_ckpt_path)}")
+                print(f"  --> [Fail-Safe Checkpoint @ Step {step}/{total_batches}] Saved to {os.path.basename(latest_ckpt_path)}")
 
-        return total_loss / max(num_batches, 1)
+                # Check time budget to stop gracefully before Kaggle/Colab 12-hr cutoff
+                if self.max_hours is not None:
+                    elapsed_hrs = (time.time() - self.training_start_time) / 3600.0
+                    if elapsed_hrs >= self.max_hours:
+                        print(f"\n[TIME BUDGET REACHED: {elapsed_hrs:.2f}h >= {self.max_hours:.2f}h]")
+                        print(f"Gracefully stopping and preserving checkpoint so Kaggle Commit saves outputs cleanly!")
+                        return total_loss / max(steps_run, 1), True
+
+        return total_loss / max(steps_run, 1), False
 
     @torch.no_grad()
     def validate(self) -> Tuple[float, float, float, float, float, float]:
@@ -389,6 +425,7 @@ class LAVDFTrainer:
                 import shutil
                 shutil.copy2(drive_best, best_ckpt_path)
 
+        resume_step = 0
         if resume and os.path.exists(latest_ckpt_path):
             try:
                 print(f"[{self.mode.upper()} Resume] Resuming from checkpoint: {latest_ckpt_path}")
@@ -410,9 +447,11 @@ class LAVDFTrainer:
                 is_complete = ckpt.get("is_epoch_complete", True)
                 if is_complete:
                     start_epoch = ckpt.get("epoch", 0) + 1
+                    resume_step = 0
                 else:
                     start_epoch = ckpt.get("epoch", 1)
-                    print(f"[{self.mode.upper()} Resume] Resuming interrupted epoch {start_epoch}...")
+                    resume_step = ckpt.get("step", 0)
+                    print(f"[{self.mode.upper()} Resume] Resuming interrupted epoch {start_epoch} from step {resume_step}...")
 
                 best_val_metric = ckpt.get("best_metric", -1.0)
                 best_epoch = ckpt.get("epoch", 0)
@@ -421,25 +460,65 @@ class LAVDFTrainer:
             except Exception as e:
                 print(f"[!] Warning: Failed to resume from {latest_ckpt_path}: {e}. Starting fresh.")
                 start_epoch = 1
+                resume_step = 0
 
         print(f"\n{'='*75}")
         print(f"STARTING TRAINING: {self.mode.upper()} (Epochs {start_epoch} to {self.epochs})")
         print(f"{'='*75}")
 
         current_ep = start_epoch
+        self.last_completed_step = resume_step
+
+        import signal
+        def _signal_handler(signum, frame):
+            sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+            print(f"\n[SIGNAL CAUGHT: {sig_name}] Saving fail-safe checkpoint immediately...")
+            sig_state = {
+                "epoch": current_ep,
+                "step": getattr(self, "last_completed_step", 0),
+                "is_epoch_complete": False,
+                "mode": self.mode,
+                "best_metric": best_val_metric,
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict(),
+                "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
+                "history": self.history,
+                "config": {"dim": self.dim, "mode": self.mode},
+                "crash_reason": f"OS Termination Signal {sig_name}",
+            }
+            emergency_path = os.path.join(self.save_dir, f"{self.checkpoint_prefix}{self.mode}_emergency_crash.pth")
+            self._atomic_save(sig_state, emergency_path)
+            self._atomic_save(sig_state, latest_ckpt_path)
+            print(f"  --> Fail-safe checkpoint saved at: {latest_ckpt_path} (Epoch {current_ep}, Step {sig_state['step']})")
+            sys.exit(0)
+
+        try:
+            signal.signal(signal.SIGTERM, _signal_handler)
+            signal.signal(signal.SIGINT, _signal_handler)
+        except Exception:
+            pass
+
         try:
             for ep in range(start_epoch, self.epochs + 1):
                 current_ep = ep
                 t0 = time.time()
-                trn_loss = self.train_epoch(
+                ep_resume_step = resume_step if ep == start_epoch else 0
+                trn_loss, time_budget_reached = self.train_epoch(
                     ep,
                     latest_ckpt_path=latest_ckpt_path,
                     best_val_metric=best_val_metric,
+                    resume_step=ep_resume_step,
                 )
+
+                if time_budget_reached:
+                    # Graceful early exit due to --max_hours budget
+                    break
 
                 # Instantly persist latest checkpoint so training progress is never lost
                 interim_state = {
                     "epoch": ep,
+                    "step": len(self.train_loader),
                     "is_epoch_complete": True,
                     "mode": self.mode,
                     "best_metric": best_val_metric,
@@ -484,6 +563,7 @@ class LAVDFTrainer:
                 # Checkpoint saving (selection strictly on validation)
                 ckpt_state = {
                     "epoch": ep,
+                    "step": len(self.train_loader),
                     "is_epoch_complete": True,
                     "mode": self.mode,
                     "best_metric": val_metric,
@@ -513,6 +593,14 @@ class LAVDFTrainer:
                     if patience_counter >= self.patience:
                         print(f"\n[Early Stopping Triggered] No validation improvement in {self.patience} epochs. Halting.")
                         break
+
+                # Check epoch-end time budget
+                if self.max_hours is not None:
+                    elapsed_hrs = (time.time() - self.training_start_time) / 3600.0
+                    if elapsed_hrs >= self.max_hours:
+                        print(f"\n[TIME BUDGET REACHED: {elapsed_hrs:.2f}h >= {self.max_hours:.2f}h]")
+                        print(f"Gracefully stopping after Epoch {ep} so all Kaggle Commit outputs are safely saved!")
+                        break
         except (Exception, KeyboardInterrupt) as exc:
             print(f"\n{'!'*75}")
             print(f"[FAIL-SAFE TRIGGERED] Interruption or error caught: {type(exc).__name__}: {exc}")
@@ -520,6 +608,7 @@ class LAVDFTrainer:
             print(f"{'!'*75}")
             emergency_state = {
                 "epoch": current_ep,
+                "step": getattr(self, "last_completed_step", 0),
                 "is_epoch_complete": False,
                 "mode": self.mode,
                 "best_metric": best_val_metric,
@@ -535,8 +624,8 @@ class LAVDFTrainer:
             self._atomic_save(emergency_state, emergency_path)
             self._atomic_save(emergency_state, latest_ckpt_path)
             print(f"  --> Emergency checkpoint safely preserved at: {emergency_path}")
-            print(f"  --> Latest checkpoint updated at: {latest_ckpt_path}")
-            print(f"[Resume Instructions] Simply re-run training with --resume to continue from epoch {current_ep}.\n")
+            print(f"  --> Latest checkpoint updated at: {latest_ckpt_path} (Epoch {current_ep}, Step {emergency_state['step']})")
+            print(f"[Resume Instructions] Simply re-run training with --resume to continue from epoch {current_ep}, step {emergency_state['step']}.\n")
             raise exc
 
         # Save training history files
@@ -575,7 +664,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints_lavdf")
     parser.add_argument("--log_dir", type=str, default="results_lavdf")
-    parser.add_argument("--save_interval_steps", type=int, default=500, help="Save interim checkpoint every N steps to prevent loss on crash/timeout")
+    parser.add_argument("--save_interval_steps", type=int, default=250, help="Save interim checkpoint every N steps to prevent loss on crash/timeout")
+    parser.add_argument("--max_hours", type=float, default=None, help="Maximum runtime in hours before graceful checkpoint save and clean exit (e.g., 10.0 on Kaggle)")
     parser.add_argument("--drive_backup", type=str, default=None, help="Directory on Google Drive to sync checkpoints")
     parser.add_argument("--limit_samples", type=int, default=None)
     parser.add_argument("--resume", action="store_true", default=True, help="Automatically resume from latest checkpoint if available.")
@@ -639,6 +729,7 @@ def main():
         drive_backup=args.drive_backup,
         limit_samples=args.limit_samples,
         save_interval_steps=args.save_interval_steps,
+        max_hours=args.max_hours,
     )
     trainer.fit(resume=args.resume)
 
