@@ -10,13 +10,14 @@
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{url}
+\usepackage{hyperref}
 
 \def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
 
 \begin{document}
 
-\title{RMS-AV: Reliability- and Manipulation-Aware Selective Audio-Visual Fusion for Multimodal Deepfake Detection}
+\title{Reliability-Gated Audio-Visual Fusion with Cross-Modal Contrastive Incoherence for Deepfake Detection on the LAV-DF Benchmark}
 
 \author{
 \IEEEauthorblockN{Akhil Rajan P\IEEEauthorrefmark{1}, P T Sahasra\IEEEauthorrefmark{2}, Aboli\IEEEauthorrefmark{3}, Famie\IEEEauthorrefmark{4}}
@@ -28,300 +29,457 @@ Correspondence: akhilvit28@gmail.com\IEEEauthorrefmark{1}}
 \maketitle
 
 \begin{abstract}
-Multimodal deepfake detection has emerged as an indispensable defense against hyper-realistic synthetic media. While modern forensic architectures process both acoustic and visual channels, conventional models predominantly rely on static feature concatenation or unconstrained linear projections. Under asymmetric forgeries---wherein an adversary manipulates solely one modality (e.g., visual facial replacement accompanied by pristine audio, or neural voice synthesis overlaid onto uncorrupted broadcast video)---static fusion allows pristine streams to attenuate forensic indicators, often degrading joint detection accuracy below unimodal baselines. To overcome this fundamental limitation, we propose \textbf{RMS-AV} (Reliability- and Manipulation-Aware Selective Audio-Visual Fusion). RMS-AV introduces: (1) a \textbf{Temporal Saliency Aggregator (TSA)} combining Bidirectional GRU with self-attention pooling to capture transient inter-frame boundary flickering and mouth-shape artifacts without temporal dilution; (2) a \textbf{Cross-Modal Forensic Contrastive Incoherence (CM-FCI)} hyperspherical projection module supervised via margin contrastive loss that quantifies cross-modal dissonance $D_{\text{incoherent}} \in [0, 1]$; (3) an \textbf{Incoherence-Guided Dynamic Reliability Gate} with FP16-safe validity masking that dynamically routes weights conditioned on channel integrity and cross-modal dissonance; and (4) a multi-task auxiliary supervision objective preserving unimodal forensic gradient flow. Evaluated on the standardized \textbf{LAV-DF} benchmark consisting of 136,304 media samples across 26,100 held-out test recordings, RMS-AV achieves state-of-the-art performance with 81.80\% accuracy, 69.82\% Macro-F1, and an AUROC of 0.9674. Under extreme modality-drop stress testing simulating sensor failure or channel loss, RMS-AV retains 73.6\% of its clean Macro-F1 score, whereas conventional fusion models suffer catastrophic performance degradation.
+Audio-visual deepfake detection systems that concatenate acoustic and visual features under a fixed weighting scheme are susceptible to performance degradation when only one modality has been manipulated or when a stream is absent at inference time. This paper presents \textbf{RMS-AV}, an audio-visual deepfake detector that combines four mechanisms to address this limitation: (i) a Temporal Saliency Aggregator (TSA) that replaces uniform frame averaging with bidirectional-GRU attention pooling, (ii) a Cross-Modal Forensic Contrastive Incoherence (CM-FCI) module that projects both modalities onto a shared hypersphere and supervises their angular distance with a margin contrastive loss, (iii) a dynamic reliability gate whose softmax weights are conditioned on the CM-FCI incoherence score and whose missing-stream entries are masked to $-10^{4}$ before normalization, and (iv) auxiliary unimodal classification heads that maintain gradient flow to each encoder during joint training. We train and evaluate RMS-AV on a stratified 8{,}000-sample training subset and a 1{,}999-sample held-out test subset of the Localized Audio-Visual DeepFake (LAV-DF) benchmark across four manipulation categories. On clean evaluation, RMS-AV achieves 99.90\% accuracy, 99.87\% Macro-F1, an AUROC of 1.0000, and an expected calibration error of 0.002. Under simulated complete video dropout, the model retains 85.35\% Macro-F1 (a 14.52 percentage-point reduction), and under audio dropout it retains 98.83\% Macro-F1. We report full confusion matrices, per-category accuracy, gate statistics, and calibration figures for all three evaluation conditions, and discuss the significant limitations of our experimental scope, including the reduced training set, the absence of independently trained baselines, and the lack of cross-dataset generalization evidence.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Deepfake detection, Multimodal fusion, Audio-visual forensics, Reliability gating, Auxiliary supervision, LAV-DF benchmark.
+Deepfake detection, audio-visual fusion, reliability gating, contrastive learning, missing modality, LAV-DF.
 \end{IEEEkeywords}
 
+%% ====================================================================
 \section{Introduction}
-Recent developments in generative adversarial networks (GANs), latent diffusion models, and neural speech synthesis algorithms have enabled the generation of hyper-realistic digital forgeries~\cite{rossler2019faceforensics,korshunov2018deepfakes}. Synthetic videos depicting public figures, judicial witnesses, and digital banking users pose unprecedented threats to information integrity, social cohesion, and biometric authentication infrastructure. 
+%% ====================================================================
 
-In response, digital forensic methodologies have rapidly evolved. Early detection frameworks operated exclusively on unimodal signals, searching either for facial spatial artifacts (e.g., blending boundaries, color discrepancies, irregular pupil reflections~\cite{rossler2019faceforensics}) or acoustic synthesis traces (e.g., vocoder phase discontinuities, spectral tilt anomalies~\cite{korshunov2018deepfakes}). However, unimodal forensic architectures are inherently blind to cross-modal incoherence and remain susceptible to domain-specific evasion tactics. Consequently, researchers transitioned toward multimodal audio-visual architectures capable of cross-verifying biometric synchrony~\cite{haliassos2021lips,cai2022lavdf}.
+Advances in face synthesis~\cite{rossler2019faceforensics}, lip-sync manipulation, and neural voice cloning have made it possible to produce audiovisual media in which either the visual track, the acoustic track, or both have been replaced with generated content. These forgeries pose practical risks in contexts ranging from identity fraud to misinformation campaigns, and they have motivated a substantial body of detection research.
+
+Early detection systems operate on a single modality. Visual detectors search for spatial artifacts such as blending boundaries, colour inconsistencies, and irregular facial geometry~\cite{rossler2019faceforensics}. Acoustic detectors target spectral traces of vocoders and text-to-speech systems~\cite{korshunov2018deepfakes}. Neither class of detector can identify manipulations that occur exclusively in the other modality.
+
+Multimodal detectors fuse both streams and can, in principle, exploit the physical coupling between lip motion and speech~\cite{haliassos2021lips}. The LAV-DF benchmark~\cite{cai2022lavdf} was constructed specifically to evaluate detection under asymmetric manipulation: its 136{,}304 recordings include samples where only the video is forged, only the audio is forged, both are forged, or neither is forged. Under this asymmetric setting, a detector that assigns equal weight to both modalities may allow an unmanipulated stream to mask forensic cues in the manipulated one. A further practical concern is robustness to missing input: when one stream is absent due to sensor failure or network loss, a fixed-weight concatenation model produces an undefined or degenerate representation.
+
+Several recent studies have addressed adaptive audio-visual gating. Zhou and Lim~\cite{zhou2021joint} proposed a joint audio-visual representation learning framework for deepfake detection. Mittal et al.~\cite{mittal2020emotions} used affective cues to detect inconsistencies between speech emotion and facial expression. Chugh et al.~\cite{chugh2020not} combined phoneme and viseme representations to detect lip-sync deepfakes. Feng et al.~\cite{feng2023selfsuper} explored self-supervised audio-visual contrastive learning for deepfake detection. While these methods incorporate both modalities, they typically assume that both streams are always available and do not provide an explicit mechanism for graceful degradation under stream loss, nor do they separately measure and supervise cross-modal incoherence as an explicit scalar feature available to the gating network.
+
+In this paper, we describe \textbf{RMS-AV} (Reliability- and Manipulation-Aware Selective Audio-Visual Fusion), which integrates four components:
+\begin{enumerate}
+    \item \textbf{Temporal Saliency Aggregator (TSA):} A bidirectional GRU with learned attention pooling over sampled video frames, designed to weight temporally salient frames (e.g., those near splicing boundaries or lip-sync discontinuities) more heavily than uniform averaging would.
+    \item \textbf{Cross-Modal Forensic Contrastive Incoherence (CM-FCI):} A projection head that maps visual and acoustic embeddings onto a unit hypersphere, computes a scalar incoherence score from their cosine distance, and is trained with a margin contrastive loss to separate authentic (concordant) from manipulated (discordant) pairs.
+    \item \textbf{Dynamic Reliability Gate with Validity Masking:} A learned gating network whose input includes the CM-FCI incoherence score and whose output weights are masked to suppress absent streams before softmax normalization.
+    \item \textbf{Auxiliary Unimodal Heads:} Separate binary classification heads on each encoder's output, trained jointly with the fused prediction to preserve gradient flow to each modality encoder.
+\end{enumerate}
+
+We train and evaluate RMS-AV on a stratified subset of the LAV-DF dataset and report results under clean, missing-video, and missing-audio conditions. We emphasise that the present study constitutes a proof-of-concept evaluation on a reduced data scale; we do not claim state-of-the-art performance relative to the full LAV-DF leaderboard, and we identify the experiments that would be needed to substantiate broader claims.
+
+%% ====================================================================
+\section{Related Work}
+%% ====================================================================
+
+\subsection{Unimodal Deepfake Detection}
+Visual deepfake detection has progressed from hand-crafted artefact detectors to convolutional networks~\cite{rossler2019faceforensics} and, more recently, transformer-based architectures~\cite{coccomini2022combining}. Acoustic deepfake detection targets vocoder signatures, phase discontinuities, and spectral anomalies~\cite{korshunov2018deepfakes}. The ASVspoof challenge series~\cite{yamagishi2021asvspoof} has driven progress in audio-only anti-spoofing systems. Neither modality alone can detect forgeries confined to the other channel.
+
+\subsection{Audio-Visual Deepfake Detection}
+Multimodal approaches aim to exploit the physiological coupling between speech production and facial motion. Haliassos et al.~\cite{haliassos2021lips} trained a visual-speech model and demonstrated that pre-training on lip reading improves detection generalisation. Zhou and Lim~\cite{zhou2021joint} proposed a joint embedding space for audio-visual deepfake detection. Mittal et al.~\cite{mittal2020emotions} leveraged affective speech-face mismatches. Chugh et al.~\cite{chugh2020not} combined phoneme-viseme features for lip-sync forgery detection. Cai et al.~\cite{cai2022lavdf} introduced the LAV-DF dataset with temporal annotations for localised manipulation detection. Feng et al.~\cite{feng2023selfsuper} proposed a self-supervised contrastive framework for learning audio-visual correspondences without manipulation labels. Ilyas et al.~\cite{ilyas2023avfakenet} developed AVFakeNet, a unified network for joint audio-visual deepfake detection. These methods generally use attention or gating to weight modality contributions, but they do not combine an explicit, supervised cross-modal incoherence metric with a validity-masked gating mechanism for graceful single-stream fallback.
+
+\subsection{Missing-Modality Robustness}
+The problem of missing or corrupted modalities has been studied extensively in multimodal sentiment analysis and medical imaging~\cite{ma2022multimodal}. Strategies include modality dropout during training, modality-invariant representations, and reconstruction-based imputation. In deepfake detection, this concern is less explored. Our approach uses input-level validity masking rather than modality dropout augmentation during training---a design choice whose implications we discuss in Section~\ref{sec:discussion}.
+
+%% ====================================================================
+\section{Proposed Method: RMS-AV}
+%% ====================================================================
+
+Fig.~\ref{fig:architecture} provides an overview. The model processes a video stream and an audio stream through separate encoders, computes a cross-modal incoherence score, passes all three signals through a gating network, and produces a fused prediction.
 
 \begin{figure*}[t]
 \centering
 \IfFileExists{figures/fig1_architecture.png}{%
   \includegraphics[width=\textwidth]{figures/fig1_architecture.png}%
 }{%
-  \fbox{\parbox{0.98\textwidth}{\centering \vspace{1.5cm} \textbf{[Figure 1: Architectural Schematic of RMS-AV]} \\ \textit{Visual stream (ResNet-18) and acoustic stream (Conv4) feed into the Dynamic Reliability Gate with validity masking, selective fusion, and multi-task auxiliary heads.}\\ \vspace{1.5cm}}}%
+  \fbox{\parbox{0.98\textwidth}{\centering \vspace{1.5cm} \textbf{[Figure 1: Architectural Schematic of RMS-AV]} \\ \textit{Visual stream (ResNet-18 + TSA) and acoustic stream (Conv4) feed into the CM-FCI module and Dynamic Reliability Gate.}\\ \vspace{1.5cm}}}%
 }
-\caption{End-to-End Architectural Pipeline of RMS-AV. Raw video and 4.0\,s manipulation-aligned audio spectrograms are mapped into unimodal latent representations $\mathbf{h}_v$ and $\mathbf{h}_a$. The Dynamic Reliability Gating network evaluates concatenated embeddings to compute stream-specific confidence weights $[g_v, g_a]$ subject to FP16-safe missing-stream masking. Unimodal representations are supervised via auxiliary classification heads ($\lambda_{\text{aux}} = 0.20$), preventing gradient starvation during joint multimodal training.}
+\caption{End-to-end architecture of RMS-AV. Eight uniformly sampled video frames pass through a shared ResNet-18 backbone and the Temporal Saliency Aggregator (TSA) to produce $\mathbf{h}_v \in \mathbb{R}^{256}$. A 4.0-second audio segment is converted to an 80-band log-mel spectrogram and encoded by a four-layer CNN to produce $\mathbf{h}_a \in \mathbb{R}^{256}$. The CM-FCI module projects both embeddings onto a unit hypersphere and computes $D_{\text{inc}} \in [0,1]$. The reliability gate receives $[\mathbf{h}_a; \mathbf{h}_v; D_{\text{inc}}]$, applies validity masking, and outputs softmax weights $[g_a, g_v]$. The weighted embeddings are concatenated and classified by a two-layer MLP. Auxiliary heads on $\mathbf{h}_a$ and $\mathbf{h}_v$ provide additional supervision.}
 \label{fig:architecture}
 \end{figure*}
 
-Despite their conceptual promise, multimodal architectures introduce a severe, under-addressed vulnerability: \textit{asymmetric modality forgery}. In natural dissemination campaigns, adversaries rarely synthesize both speech and facial tracks simultaneously; rather, visual face swaps are commonly combined with genuine speech, or synthetic voice clones are spliced over unedited television footage. When conventional detectors fuse these representations via uniform feature concatenation:
+\subsection{Visual Encoder with Temporal Saliency Aggregation}
+
+Given a video, we uniformly sample $T = 8$ frames and resize each to $224 \times 224 \times 3$ with ImageNet normalisation. Each frame $\mathbf{x}_{v,t}$ is processed through a ResNet-18 backbone (initialised from ImageNet-pretrained weights) followed by a linear projection:
 \begin{equation}
-\mathbf{h}_{\text{fused}} = \mathbf{W}[\mathbf{h}_v; \mathbf{h}_a] + \mathbf{b}
+\mathbf{f}_{v,t} = \operatorname{Linear}(\operatorname{ResNet18}(\mathbf{x}_{v,t})) \in \mathbb{R}^D, \quad t \in \{1, \dots, T\}
 \end{equation}
-the unmanipulated, authentic stream inherently provides strong negative evidence ($\hat{y} \to 0$). This attenuates the localized forensic cues present in the manipulated channel, causing standard fusion architectures to exhibit higher false-negative rates on asymmetric deepfakes than unimodal detectors. Furthermore, in practical deployment scenarios characterized by network packet drops, sensor occlusion, or microphone failure, static concatenation architectures experience total decision collapse.
-
-To resolve these fundamental challenges, we introduce \textbf{RMS-AV} (Reliability- and Manipulation-Aware Selective Audio-Visual Fusion). The primary contributions of this paper are:
-\begin{enumerate}
-    \item \textbf{Temporal Saliency Aggregation (TSA):} We design a Bidirectional GRU network with learned attention pooling over temporal visual frames, capturing localized inter-frame splicing and mouth-shape artifacts that are otherwise obscured by standard uniform mean pooling.
-    \item \textbf{Cross-Modal Forensic Contrastive Incoherence (CM-FCI):} We formulate a normalized hyperspherical projection metric supervised via margin contrastive loss that quantifies cross-modal identity and affective dissonance ($D_{\text{incoherent}} \in [0, 1]$), penalizing asymmetric tampering.
-    \item \textbf{Incoherence-Guided Reliability Gating \& FP16 Masking:} We introduce a parameterized gating mechanism that dynamically modulates stream weights $[g_v, g_a]$ conditioned on cross-modal latents and explicit incoherence metrics, fortified by FP16-safe masking for numerical stability under single-stream dropouts.
-    \item \textbf{Multi-Task Auxiliary Regularization:} We integrate stream-specific auxiliary heads trained under composite multi-task binary cross-entropy ($\lambda_{\text{aux}} = 0.20$), guaranteeing uninterrupted unimodal gradient flow and preventing representation collapse during joint training.
-    \item \textbf{Comprehensive LAV-DF Benchmarking:} We validate RMS-AV against unimodal and joint concatenation baselines across the 136,304-sample Localized Audio-Visual Deepfake (LAV-DF) benchmark~\cite{cai2022lavdf}, achieving an AUROC of 0.9674 and exceptional stress retention under complete stream omission.
-\end{enumerate}
-
-\section{Related Work}
-\subsection{Unimodal Deepfake Forensics}
-Unimodal forensic detectors focus independently on visual or auditory artifacts. Visual detectors exploit facial blending boundaries, warped facial geometry, texture irregularities, and temporal blink inconsistency~\cite{rossler2019faceforensics}. However, state-of-the-art diffusion-based facial synthesizers increasingly generate artifact-free frames, diminishing the efficacy of spatial-only models. Acoustic detectors focus on spectral unnaturalness and vocoder synthesis traces~\cite{korshunov2018deepfakes}. Nevertheless, acoustic detectors are powerless against visual-only deepfakes such as identity swaps and facial reenactments.
-
-\subsection{Multimodal Audio-Visual Detection}
-Multimodal forensic research explores biometric correlation across channels, including phonetic-lip sync consistency~\cite{haliassos2021lips} and affective speech-expression alignment. While effective on fully synthetic videos, empirical studies confirm that standard fusion degenerates when exposed to asymmetric manipulations. The LAV-DF dataset~\cite{cai2022lavdf} was specifically constructed to benchmark temporal localization and asymmetric manipulation across 136,304 media samples. RMS-AV directly addresses the core vulnerability highlighted by LAV-DF: asymmetric channel manipulation.
-
-\section{Proposed Method: RMS-AV}
-The overall framework of RMS-AV is illustrated in Fig.~\ref{fig:architecture}. The model comprises two unimodal feature extractors with Temporal Saliency Aggregation (TSA), a Cross-Modal Forensic Contrastive Incoherence (CM-FCI) module, an Incoherence-Guided Dynamic Reliability Gate, an auxiliary multi-task supervision module, and a joint classification head.
-
-\subsection{Acoustic \& Visual Feature Encoders}
-\textbf{Acoustic Feature Extraction ($f_a$):} Given an audio stream, raw signals are resampled to 16\,kHz mono. We compute 80-band log-Mel filterbank spectrograms over a 4.0-second temporal window ($N_{\text{fft}} = 1024$, $\text{hop} = 512$), yielding an input tensor $\mathbf{X}_a \in \mathbb{R}^{1 \times 80 \times 401}$. To maximize sensitivity to localized audio forgeries, the 4.0\,s window is centered around detected speech boundaries. The spectrogram is processed by a 4-stage convolutional neural network with 2D batch normalization, ReLU activations, and adaptive spatial pooling, projecting $\mathbf{X}_a$ to acoustic embedding $\mathbf{h}_a \in \mathbb{R}^D$ ($D=256$).
-
-\textbf{Visual Feature Extraction with Temporal Saliency Aggregation ($f_v$):} Given a video sequence, $T=8$ frames are sampled uniformly across the temporal duration and resized to $224 \times 224 \times 3$, normalized using standard ImageNet parameters. Each frame is processed through a ResNet-18 convolutional backbone:
+where $D = 256$. Standard approaches average these frame embeddings uniformly. We instead apply a \textbf{Temporal Saliency Aggregator (TSA)}: a single-layer bidirectional GRU processes the sequence and the output is combined with the input via a residual connection and layer normalisation:
 \begin{equation}
-\mathbf{f}_{v, t} = \text{Linear}(\text{ResNet18}(\mathbf{x}_{v, t})) \quad \in \mathbb{R}^D, \quad t \in \{1, \dots, T\}
+\mathbf{h}_{v,t}^{\mathrm{temp}} = \operatorname{BiGRU}(\mathbf{f}_{v,t}), \quad \tilde{\mathbf{f}}_{v,t} = \operatorname{LayerNorm}(\mathbf{f}_{v,t} + \mathbf{h}_{v,t}^{\mathrm{temp}})
 \end{equation}
-Existing multimodal deepfake detectors predominantly rely on uniform temporal average pooling ($\frac{1}{T}\sum_t \mathbf{f}_{v, t}$), which inherently dampens brief temporal manipulation artifacts such as inter-frame boundary flicker, mouth-shape stutter, and blending seams. To overcome this limitation, we introduce a \textbf{Temporal Saliency Aggregator (TSA)}. The sequence $\{\mathbf{f}_{v, t}\}_{t=1}^T$ is processed through a bidirectional recurrent block with residual normalization:
+Temporal attention scores are computed by a two-layer MLP with $\tanh$ activation and softmax normalisation:
 \begin{equation}
-\mathbf{h}_{v, t}^{\text{temp}} = \operatorname{BiGRU}(\mathbf{f}_{v, t}) \in \mathbb{R}^D, \quad \tilde{\mathbf{f}}_{v, t} = \operatorname{LayerNorm}(\mathbf{f}_{v, t} + \mathbf{h}_{v, t}^{\text{temp}})
+e_t = \mathbf{w}_{\mathrm{sal}}^\top \tanh(\mathbf{W}_{\mathrm{sal}} \tilde{\mathbf{f}}_{v,t} + \mathbf{b}_{\mathrm{sal}}), \quad \alpha_t = \frac{\exp(e_t)}{\sum_{k=1}^T \exp(e_k)}
 \end{equation}
-We then compute dynamic temporal attention weights $\alpha_t$:
+The visual embedding is the attention-weighted sum:
 \begin{equation}
-e_t = \mathbf{w}_{\text{sal}}^\top \tanh(\mathbf{W}_{\text{sal}} \tilde{\mathbf{f}}_{v, t} + \mathbf{b}_{\text{sal}}), \quad \alpha_t = \frac{\exp(e_t)}{\sum_{k=1}^T \exp(e_k)}
+\mathbf{h}_v = \sum_{t=1}^T \alpha_t \tilde{\mathbf{f}}_{v,t} \in \mathbb{R}^D
 \end{equation}
-The aggregated visual latent representation is obtained via saliency-weighted accumulation:
-\begin{equation}
-\mathbf{h}_v = \sum_{t=1}^T \alpha_t \tilde{\mathbf{f}}_{v, t} \quad \in \mathbb{R}^D
-\end{equation}
+
+\subsection{Acoustic Encoder}
+
+Raw audio is resampled to 16\,kHz mono and converted into an 80-band log-mel spectrogram over a 4.0-second window using an STFT with $n_{\mathrm{fft}} = 400$ and hop length 160, followed by amplitude-to-dB conversion and zero-mean unit-variance normalisation per clip. This produces a tensor $\mathbf{X}_a \in \mathbb{R}^{1 \times 80 \times 401}$. The spectrogram passes through a four-stage convolutional network (Conv2d$\rightarrow$BN$\rightarrow$ReLU$\rightarrow$MaxPool repeated four times with channel widths $[32, 64, 128, 256]$, ending with adaptive average pooling to $1 \times 1$) and a final linear layer to produce $\mathbf{h}_a \in \mathbb{R}^D$.
+
+\textbf{Audio windowing policy.} During training, when ground-truth temporal annotations (\texttt{fake\_periods}) are available for a given clip, the 4.0-second extraction window is centred on the midpoint of the first annotated manipulation segment. For authentic clips (which have no manipulation annotation), the window starts at the beginning of the file. At test time, the same procedure applies: the evaluation code receives the annotation metadata, and the windowing is applied identically. We acknowledge that this constitutes an oracle windowing strategy that relies on temporal annotation availability. Section~\ref{sec:limitations} discusses the implications of this design.
 
 \subsection{Cross-Modal Forensic Contrastive Incoherence (CM-FCI)}
-In natural human recordings, acoustic speech formants and facial visual muscle dynamics are anatomically coupled. Conversely, in asymmetric manipulations (such as facial identity replacement with pristine target speech, or synthetic voice cloning overlaid onto unedited video), the modalities exhibit physical and affective dissonance. Conventional multimodal detectors lack an explicit mechanism to measure this cross-modal discrepancy. 
 
-We formulate the \textbf{Cross-Modal Forensic Contrastive Incoherence (CM-FCI)} module. Visual and acoustic latents are mapped into a normalized unit hypersphere $\mathbb{S}^{d_{\text{proj}}-1}$ ($d_{\text{proj}}=128$):
+When both streams are present, we project $\mathbf{h}_v$ and $\mathbf{h}_a$ through separate two-layer MLPs (with batch normalisation and ReLU) into $d_{\mathrm{proj}} = 128$ dimensions and $\ell_2$-normalise onto the unit hypersphere:
 \begin{equation}
-\mathbf{z}_v = \frac{\mathbf{W}_{\text{fci}, v} \mathbf{h}_v}{\|\mathbf{W}_{\text{fci}, v} \mathbf{h}_v\|_2}, \quad \mathbf{z}_a = \frac{\mathbf{W}_{\text{fci}, a} \mathbf{h}_a}{\|\mathbf{W}_{\text{fci}, a} \mathbf{h}_a\|_2}
+\mathbf{z}_v = \frac{\phi_v(\mathbf{h}_v)}{\|\phi_v(\mathbf{h}_v)\|_2}, \quad \mathbf{z}_a = \frac{\phi_a(\mathbf{h}_a)}{\|\phi_a(\mathbf{h}_a)\|_2}
 \end{equation}
-The scalar cross-modal incoherence metric $D_{\text{incoherent}} \in [0, 1]$ is computed as:
+The scalar incoherence score is:
 \begin{equation}
-D_{\text{incoherent}} = \frac{1 - \mathbf{z}_v^\top \mathbf{z}_a}{2}
+D_{\mathrm{inc}} = \frac{1 - \mathbf{z}_v^\top \mathbf{z}_a}{2} \in [0, 1]
 \end{equation}
-We supervise this latent space via a contrastive margin loss:
+This is supervised by a margin contrastive loss:
 \begin{equation}
-\mathcal{L}_{\text{FCI}} = (1 - y)(1 - \mathbf{z}_v^\top \mathbf{z}_a) + y \max(0, \mathbf{z}_v^\top \mathbf{z}_a - m_{\text{fci}})
+\mathcal{L}_{\mathrm{FCI}} = (1 - y)(1 - \mathbf{z}_v^\top \mathbf{z}_a) + y \max(0, \mathbf{z}_v^\top \mathbf{z}_a - m)
 \end{equation}
-where $m_{\text{fci}} = 0.20$. For authentic samples ($y=0$), $\mathcal{L}_{\text{FCI}}$ enforces cross-modal alignment ($\mathbf{z}_v^\top \mathbf{z}_a \to 1$). For deepfake samples ($y=1$), it enforces orthogonal separation ($\mathbf{z}_v^\top \mathbf{z}_a \le m_{\text{fci}}$).
+where $y \in \{0, 1\}$ is the binary manipulation label and $m = 0.20$. For authentic pairs ($y = 0$), the loss encourages cosine similarity towards 1; for manipulated pairs ($y = 1$), it pushes cosine similarity below $m$. When only one stream is present, $D_{\mathrm{inc}}$ is set to 0 and $\mathcal{L}_{\mathrm{FCI}}$ is excluded from the loss.
 
-\subsection{Incoherence-Guided Reliability Gate with Validity Masking}
-To prevent an unmanipulated stream from suppressing forgery evidence, the gating network evaluates the concatenated embeddings augmented by the explicit incoherence score $[\mathbf{h}_a; \mathbf{h}_v; D_{\text{incoherent}}] \in \mathbb{R}^{2D + 1}$:
-\begin{equation}
-\mathbf{s} = \mathbf{W}_2 \operatorname{ReLU}(\mathbf{W}_1 [\mathbf{h}_a; \mathbf{h}_v; D_{\text{incoherent}}] + \mathbf{b}_1) + \mathbf{b}_2 \quad \in \mathbb{R}^2
-\end{equation}
-where $\mathbf{W}_2 \in \mathbb{R}^{2 \times (D/2)}$ and $\mathbf{b}_2 \in \mathbb{R}^2$ are initialized to zero ($\mathbf{W}_2 = \mathbf{0}, \mathbf{b}_2 = \mathbf{0}$), establishing an unbiased initial prior of $[0.50, 0.50]$ at training onset.
+\subsection{Dynamic Reliability Gate with Validity Masking}
 
-Let $m_a, m_v \in \{0, 1\}$ denote binary validity indicators representing modality presence. To guarantee numerical stability under IEEE 754 16-bit half-precision (FP16) arithmetic without overflow, we apply bounded masking before softmax normalization:
+The gating network receives the concatenation $[\mathbf{h}_a; \mathbf{h}_v; D_{\mathrm{inc}}] \in \mathbb{R}^{2D + 1}$ and produces two raw scores through a two-layer MLP:
 \begin{equation}
-s_i' = \begin{cases} s_i & \text{if } m_i = 1 \\ -10^4 & \text{if } m_i = 0 \end{cases} \quad \text{for } i \in \{a, v\}
+\mathbf{s} = \mathbf{W}_2 \operatorname{ReLU}(\mathbf{W}_1 [\mathbf{h}_a; \mathbf{h}_v; D_{\mathrm{inc}}] + \mathbf{b}_1) + \mathbf{b}_2 \in \mathbb{R}^2
 \end{equation}
-The dynamic gate weights $[g_a, g_v]$ are then computed via:
+The final layer ($\mathbf{W}_2$, $\mathbf{b}_2$) is initialised to zero so that the initial gate output is $[0.5, 0.5]$.
+
+To handle absent modalities, binary validity indicators $m_a, m_v \in \{0, 1\}$ mask the raw scores before softmax:
 \begin{equation}
-[g_a, g_v] = \operatorname{softmax}([s_a', s_v'])
+s_i' = \begin{cases} s_i & \text{if } m_i = 1 \\ -10^4 & \text{if } m_i = 0 \end{cases}, \quad [g_a, g_v] = \operatorname{softmax}([s_a', s_v'])
 \end{equation}
-Since $\exp(-10^4) \equiv 0$, when stream $i$ is missing ($m_i = 0$), its gate weight is strictly $g_i = 0$.
+Since $\exp(-10^4) \approx 0$, a missing stream receives gate weight $g_i \approx 0$, and the remaining stream receives weight $\approx 1$. The value $-10^4$ is chosen to remain within the representable range of IEEE 754 half-precision arithmetic (FP16), avoiding overflow in the $\exp(\cdot)$ computation during mixed-precision training.
+
+\textbf{Role of masking during clean evaluation.} When both modalities are present ($m_a = m_v = 1$), the masking operation is an identity: $s_i' = s_i$. The mask therefore does not affect the model's behaviour on clean data. We clarify this point because it was a source of confusion in our early experiments.
+
+\subsection{Selective Fusion and Multi-Task Training Objective}
+
+The gated representation is:
+\begin{equation}
+\mathbf{h}_{\mathrm{fused}} = [g_v \mathbf{h}_v; \; g_a \mathbf{h}_a] \in \mathbb{R}^{2D}
+\end{equation}
+which is classified by a two-layer MLP (Linear$\rightarrow$ReLU$\rightarrow$Dropout(0.3)$\rightarrow$Linear) producing a single logit $\hat{y}_{\mathrm{av}}$. The total training loss is:
+\begin{equation}
+\mathcal{L}_{\mathrm{total}} = \mathcal{L}_{\mathrm{BCE}}(\hat{y}_{\mathrm{av}}, y) + \lambda_{\mathrm{aux}}(\mathcal{L}_{\mathrm{BCE}}(\hat{y}_a, y_a) + \mathcal{L}_{\mathrm{BCE}}(\hat{y}_v, y_v)) + \lambda_{\mathrm{FCI}} \mathcal{L}_{\mathrm{FCI}}
+\end{equation}
+where $\hat{y}_a$ and $\hat{y}_v$ are unimodal logits from auxiliary two-layer MLP heads, $y_a$ and $y_v$ are modality-specific manipulation labels, $\lambda_{\mathrm{aux}} = 0.20$, and $\lambda_{\mathrm{FCI}} = 0.15$.
 
 \begin{algorithm}[t]
-\caption{RMS-AV Forensic Inference and Reliability Gating}
+\caption{RMS-AV Inference}
 \label{alg:rmsav}
 \begin{algorithmic}[1]
-\REQUIRE Audio sample $\mathbf{x}_a$, video frames $\{\mathbf{x}_{v,t}\}_{t=1}^T$, validity flags $m_a, m_v \in \{0, 1\}$.
-\ENSURE Deepfake probability $\hat{p} \in [0, 1]$, gate weights $[g_v, g_a]$, incoherence score $D_{\text{incoherent}}$.
-\STATE Extract acoustic embedding: $\mathbf{h}_a \leftarrow f_a(\mathbf{x}_a) \in \mathbb{R}^D$
-\STATE Extract frame features: $\mathbf{f}_{v,t} \leftarrow \text{Linear}(\text{ResNet18}(\mathbf{x}_{v,t}))$
-\STATE Compute temporal attention weights $\alpha_t$ and aggregate: $\mathbf{h}_v \leftarrow \text{TSA}(\{\mathbf{f}_{v,t}\}_{t=1}^T)$
-\IF{$m_a == 1$ \AND $m_v == 1$}
-    \STATE Project to hypersphere: $\mathbf{z}_v \leftarrow \phi_v(\mathbf{h}_v)$, $\mathbf{z}_a \leftarrow \phi_a(\mathbf{h}_a)$
-    \STATE Compute cross-modal incoherence: $D_{\text{incoherent}} \leftarrow \frac{1 - \mathbf{z}_v^\top \mathbf{z}_a}{2}$
+\REQUIRE Video frames $\{\mathbf{x}_{v,t}\}_{t=1}^T$, audio $\mathbf{x}_a$, validity flags $m_v, m_a \in \{0,1\}$
+\ENSURE Deepfake probability $\hat{p}$, gate weights $[g_v, g_a]$, incoherence $D_{\mathrm{inc}}$
+\STATE $\mathbf{f}_{v,t} \leftarrow \operatorname{Linear}(\operatorname{ResNet18}(\mathbf{x}_{v,t}))$ for $t = 1, \dots, T$
+\STATE $\mathbf{h}_v, \{\alpha_t\} \leftarrow \operatorname{TSA}(\{\mathbf{f}_{v,t}\})$
+\STATE $\mathbf{h}_a \leftarrow f_a(\mathbf{x}_a)$
+\IF{$m_a = 1$ \AND $m_v = 1$}
+    \STATE $\mathbf{z}_v \leftarrow \phi_v(\mathbf{h}_v) / \|\phi_v(\mathbf{h}_v)\|_2$; $\mathbf{z}_a \leftarrow \phi_a(\mathbf{h}_a) / \|\phi_a(\mathbf{h}_a)\|_2$
+    \STATE $D_{\mathrm{inc}} \leftarrow (1 - \mathbf{z}_v^\top \mathbf{z}_a)/2$
 \ELSE
-    \STATE $D_{\text{incoherent}} \leftarrow 0.0$
+    \STATE $D_{\mathrm{inc}} \leftarrow 0$
 \ENDIF
-\STATE Compute raw gating scores: $\mathbf{s} \leftarrow \mathbf{W}_2 \operatorname{ReLU}(\mathbf{W}_1 [\mathbf{h}_a; \mathbf{h}_v; D_{\text{incoherent}}] + \mathbf{b}_1) + \mathbf{b}_2$
-\FOR{$i \in \{a, v\}$}
-    \IF{$m_i == 1$}
-        \STATE $s_i' \leftarrow s_i$
-    \ELSE
-        \STATE $s_i' \leftarrow -10^4$ \COMMENT{FP16-safe nullification}
-    \ENDIF
-\ENDFOR
+\STATE $\mathbf{s} \leftarrow \operatorname{GateNet}([\mathbf{h}_a; \mathbf{h}_v; D_{\mathrm{inc}}])$
+\STATE Mask: $s_i' \leftarrow s_i$ if $m_i = 1$, else $s_i' \leftarrow -10^4$
 \STATE $[g_a, g_v] \leftarrow \operatorname{softmax}([s_a', s_v'])$
-\STATE Synthesize gated representation: $\mathbf{h}_{\text{fused}} \leftarrow [g_v \mathbf{h}_v; g_a \mathbf{h}_a]$
-\STATE Compute classification logit: $\hat{y}_{\text{av}} \leftarrow \mathbf{w}_{\text{joint}}^\top \mathbf{h}_{\text{fused}} + b_{\text{joint}}$
-\STATE Compute deepfake probability: $\hat{p} \leftarrow \sigma(\hat{y}_{\text{av}})$
-\RETURN $\hat{p}, [g_v, g_a], D_{\text{incoherent}}$
+\STATE $\hat{y}_{\mathrm{av}} \leftarrow \operatorname{JointHead}([g_v \mathbf{h}_v; g_a \mathbf{h}_a])$
+\STATE $\hat{p} \leftarrow \sigma(\hat{y}_{\mathrm{av}})$
+\RETURN $\hat{p}, [g_v, g_a], D_{\mathrm{inc}}$
 \end{algorithmic}
 \end{algorithm}
 
-\subsection{Selective Fusion \& Multi-Task Joint Objective}
-The gated multimodal representation $\mathbf{h}_{\text{fused}}$ is constructed by selectively scaling each modality embedding:
+%% ====================================================================
+\section{Experimental Setup}
+%% ====================================================================
+
+\subsection{Dataset}
+
+We use the Localized Audio-Visual DeepFake (LAV-DF) dataset~\cite{cai2022lavdf}, which contains 136{,}304 media recordings distributed across official train, validation (dev), and test splits. Each recording is annotated with binary flags indicating whether the video track, the audio track, or both have been manipulated, together with temporal boundaries of the manipulation segments.
+
+The full dataset partitions are:
+\begin{itemize}
+    \item \textbf{Train:} 78{,}703 clips (21{,}254 real, 57{,}449 fake).
+    \item \textbf{Dev (validation):} 31{,}501 clips (8{,}271 real, 23{,}230 fake).
+    \item \textbf{Test:} 26{,}100 clips (6{,}906 real, 19{,}194 fake).
+\end{itemize}
+All manipulated clips derived from a given source recording reside in the same partition as the source, preventing identity leakage across splits~\cite{cai2022lavdf}.
+
+\textbf{Subset selection.} Due to computational constraints (single Kaggle session with two NVIDIA T4 GPUs, 16\,GB VRAM each), we train on a deterministic stratified random sample of 8{,}000 clips from the official training partition and evaluate on a stratified sample of 1{,}999 clips from the official test partition. Stratification is performed with a fixed random seed (42) across four categories: real, audio-only fake, video-only fake, and both-modalities fake, maintaining approximately proportional representation. This subset evaluation is a significant limitation discussed in Section~\ref{sec:limitations}.
+
+\begin{table}[t]
+\centering
+\caption{Category distribution of the evaluation (test) subset.}
+\label{tab:eval_distribution}
+\begin{tabular}{lrc}
+\toprule
+\textbf{Category} & \textbf{Count} & \textbf{Proportion (\%)} \\
+\midrule
+Real (authentic)         & 529 & 26.5 \\
+Audio-only fake          & 488 & 24.4 \\
+Video-only fake          & 494 & 24.7 \\
+Both modalities fake     & 488 & 24.4 \\
+\midrule
+\textbf{Total}           & \textbf{1{,}999} & \textbf{100.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Implementation Details}
+
+RMS-AV is implemented in PyTorch 2.x. The visual backbone is ResNet-18 initialised with ImageNet-pretrained weights. Training uses the AdamW optimiser with learning rate $10^{-4}$, weight decay $10^{-4}$, batch size 32, and cosine annealing to a minimum learning rate of $10^{-6}$ over 5 epochs. Automatic mixed precision (AMP) is used with an initial gradient scaler of 1024 and gradient norm clipping at 5.0. The best checkpoint is selected by validation Macro-F1. Training augmentations include random horizontal flips, slight brightness/contrast jitter on video frames, and SpecAugment (frequency masking with parameter 15, time masking with parameter 35) on audio spectrograms.
+
+\textbf{Important note on modality dropout.} The model is trained with \emph{both modalities always present}. No modality dropout augmentation is applied during training. The missing-modality robustness results reported in Section~\ref{sec:results} therefore reflect the model's zero-shot generalisation to stream absence, not a trained capability. This is a deliberate design choice to isolate the contribution of the architectural masking mechanism, but it means that training with modality dropout could potentially improve the missing-modality results further.
+
+\subsection{Evaluation Protocol}
+
+We evaluate the trained RMS-AV checkpoint under three conditions:
+\begin{enumerate}
+    \item \textbf{Clean:} Both audio and video streams provided as-is.
+    \item \textbf{Missing video:} Video tensor zeroed, validity flag $m_v = 0$.
+    \item \textbf{Missing audio:} Audio tensor zeroed, validity flag $m_a = 0$.
+\end{enumerate}
+
+For each condition, we report: accuracy, balanced accuracy, precision, recall, class-specific F1 scores (F1\textsubscript{fake}, F1\textsubscript{real}), Macro-F1 (arithmetic mean of F1\textsubscript{fake} and F1\textsubscript{real}), AUROC (computed from continuous predicted probabilities), PR-AUC, Brier score, expected calibration error (ECE), per-category accuracy, and the raw confusion matrix (TP, TN, FP, FN).
+
+ECE is computed using 10 equal-width bins over the predicted probability range $[0, 1]$:
 \begin{equation}
-\mathbf{h}_{\text{fused}} = [g_v \mathbf{h}_v; \; g_a \mathbf{h}_a] \quad \in \mathbb{R}^{2D}
+\mathrm{ECE} = \sum_{b=1}^{10} \frac{|B_b|}{N} \left| \mathrm{acc}(B_b) - \mathrm{conf}(B_b) \right|
 \end{equation}
-The joint classification head computes the final deepfake logit:
-\begin{equation}
-\hat{y}_{\text{av}} = \mathbf{w}_{\text{joint}}^\top \mathbf{h}_{\text{fused}} + b_{\text{joint}}
-\end{equation}
-To prevent unimodal gradient starvation and ensure explicit forensic representation learning, we attach unimodal classification heads ($\hat{y}_a = \mathbf{w}_a^\top \mathbf{h}_a + b_a$, $\hat{y}_v = \mathbf{w}_v^\top \mathbf{h}_v + b_v$) and optimize the unified multi-task loss objective:
-\begin{equation}
-\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE}}(\hat{y}_{\text{av}}, y) + \lambda_{\text{aux}} \left( \mathcal{L}_{\text{BCE}}(\hat{y}_a, y_a) + \mathcal{L}_{\text{BCE}}(\hat{y}_v, y_v) \right) + \lambda_{\text{FCI}} \mathcal{L}_{\text{FCI}}
-\end{equation}
-where $\lambda_{\text{aux}} = 0.20$, $\lambda_{\text{FCI}} = 0.15$, $y \in \{0, 1\}$ denotes overall manipulation, and $y_a, y_v \in \{0, 1\}$ denote ground-truth audio and video manipulation labels respectively.
+where $B_b$ is the set of samples whose predicted probability falls in bin $b$, $\mathrm{acc}(B_b)$ is the observed accuracy in that bin, and $\mathrm{conf}(B_b)$ is the mean predicted probability in that bin. All calibration is computed on the held-out test subset; no post-hoc calibration (e.g., temperature scaling) is applied.
+
+%% ====================================================================
+\section{Experimental Results}
+\label{sec:results}
+%% ====================================================================
+
+\subsection{Training Convergence}
+
+Table~\ref{tab:training_history} and Fig.~\ref{fig:training_dynamics} summarise the training history over five epochs.
+
+\begin{table}[t]
+\centering
+\caption{Epoch-wise training history. Best validation Macro-F1 achieved at Epoch 4 (99.74\%). $D_{\mathrm{inc}}$ denotes the mean CM-FCI incoherence score.}
+\label{tab:training_history}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{ccccccc}
+\toprule
+\textbf{Epoch} & \textbf{Train Loss} & \textbf{Val Loss} & \textbf{Val Acc (\%)} & \textbf{Val Macro-F1 (\%)} & \textbf{$D_{\mathrm{inc}}$ (Real)} & \textbf{$D_{\mathrm{inc}}$ (Fake)} \\
+\midrule
+1 & 0.3889 & 0.0549 & 97.80 & 97.08 & 0.073 & 0.630 \\
+2 & 0.2005 & 0.0152 & 99.60 & 99.49 & 0.017 & 0.594 \\
+3 & 0.1433 & 0.0342 & 99.00 & 98.70 & 0.022 & 0.693 \\
+4 & 0.1231 & 0.0048 & 99.80 & \textbf{99.74} & 0.007 & 0.666 \\
+5 & 0.1168 & 0.0058 & 99.80 & 99.74 & 0.009 & 0.678 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The model converges quickly: validation accuracy exceeds 97\% after the first epoch, and the best Macro-F1 of 99.74\% is reached at Epoch 4. Training loss continues to decrease through Epoch 5 (from 0.3889 to 0.1168) but does not produce further validation improvement, consistent with the learning rate having annealed close to its minimum.
+
+The CM-FCI incoherence scores show clear separation between authentic and manipulated samples from the first epoch onward: $D_{\mathrm{inc}}^{\mathrm{real}}$ decreases from 0.073 to 0.007 while $D_{\mathrm{inc}}^{\mathrm{fake}}$ remains between 0.594 and 0.693. The ratio exceeds $75\times$ by Epoch 4.
+
+The validation loss at Epoch 3 (0.0342) is higher than at Epochs 2 and 4, while validation accuracy drops to 99.00\%. We attribute this to the interaction between cosine annealing (which was at mid-decay at Epoch 3) and the stochastic nature of the training subset; the recovery at Epoch 4 suggests this was a transient fluctuation rather than overfitting.
 
 \begin{figure}[t]
 \centering
 \IfFileExists{figures/fig4_training_dynamics.png}{%
   \includegraphics[width=\columnwidth]{figures/fig4_training_dynamics.png}%
 }{%
-  \fbox{\parbox{0.95\columnwidth}{\centering \vspace{1.0cm} \textbf{[Figure 2: Multi-Epoch Training Dynamics]} \\ \textit{Loss profiles and validation metrics across training epochs.}\\ \vspace{1.0cm}}}%
+  \fbox{\parbox{0.95\columnwidth}{\centering \vspace{1.0cm} \textbf{[Figure 2: Training Dynamics]} \\ \textit{Left: Train/val loss across epochs. Right: Val Macro-F1 and AUC.}\\ \vspace{1.0cm}}}%
 }
-\caption{Multi-Epoch Training Convergence Profiles. (a) Cross-entropy loss trajectories demonstrate monotonic minimization under AdamW optimization. (b) Validation AUROC (96.74\%) and Macro-F1 (69.82\%) demonstrate rapid convergence within 3 epochs.}
+\caption{Training convergence. Left: training and validation loss curves. Right: validation Macro-F1 and AUROC across five epochs. Rapid convergence within two epochs is consistent with ImageNet-pretrained transfer learning on a moderate-scale dataset.}
 \label{fig:training_dynamics}
 \end{figure}
 
-\section{Experimental Configuration}
-\subsection{Dataset Partition and Zero-Leakage Protocol}
-We evaluate on the standardized LAV-DF benchmark~\cite{cai2022lavdf}, consisting of 136,304 media samples. The partition strictly adheres to the official benchmark split:
-\begin{itemize}
-    \item \textbf{Train:} 78,703 clips (21,254 Real, 57,449 Fake).
-    \item \textbf{Dev (Val):} 31,501 clips (8,271 Real, 23,230 Fake).
-    \item \textbf{Test:} 26,100 clips (6,906 Real, 19,194 Fake).
-\end{itemize}
-\textbf{Leakage Mitigation:} Crucially, every manipulated recording in LAV-DF originates from a designated source recording ($original$). All derived deepfakes reside exclusively within the same partition as their source, ensuring zero identity overlap between training and evaluation splits.
+\subsection{Clean Evaluation Results}
 
-\subsection{Implementation Details}
-RMS-AV is implemented in PyTorch and trained on an NVIDIA Tesla T4 GPU (16\,GB VRAM) utilizing automatic mixed precision (AMP). To prevent half-precision gradient overflow in ResNet-18 initial convolutional layers, the gradient scaler is initialized with $\text{init\_scale} = 1024.0$ with gradient norm clipping at $1.0$. Optimization utilizes AdamW ($\text{lr} = 10^{-4}$, $\text{weight\_decay} = 10^{-4}$) with batch size 32. Multi-epoch convergence profiles are depicted in Fig.~\ref{fig:training_dynamics}.
+Table~\ref{tab:clean_results} presents the clean evaluation results with full confusion matrix counts.
+
+\begin{table}[t]
+\centering
+\caption{Clean evaluation results on the 1{,}999-sample held-out test subset. Confusion matrix: TP = 1{,}470, TN = 527, FP = 2, FN = 0.}
+\label{tab:clean_results}
+\begin{tabular}{lc}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Accuracy               & 99.90\% \\
+Balanced Accuracy      & 99.81\% \\
+Precision (Fake)       & 99.86\% \\
+Recall (Fake)          & 100.00\% \\
+F1 (Fake class)        & 99.93\% \\
+F1 (Real class)        & 99.81\% \\
+Macro-F1               & 99.87\% \\
+AUROC                  & 1.0000 \\
+PR-AUC                 & 1.0000 \\
+Brier Score            & 0.0012 \\
+ECE                    & 0.0020 \\
+\midrule
+Mean Gate ($g_a$)      & 0.1546 \\
+Mean Gate ($g_v$)      & 0.8454 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The model misclassifies only 2 out of 1{,}999 samples: both are false positives (authentic clips predicted as fake). There are zero false negatives. The AUROC and PR-AUC are both 1.0000 (to four decimal places), indicating perfect ranking of predicted probabilities. The ECE of 0.002 indicates that the predicted probabilities are well calibrated; the Brier score of 0.0012 is consistent with this.
+
+\textbf{Gate behaviour.} On clean data, the mean gate weight is $g_v = 0.8454$ and $g_a = 0.1546$, indicating that the learned gate places substantially more weight on the visual stream. This is reasonable given that the majority of fake samples in LAV-DF include visual manipulation (video-only and both-modalities categories together constitute 49.1\% of the test subset, versus 24.4\% for audio-only).
+
+\begin{table}[t]
+\centering
+\caption{Per-category accuracy under clean evaluation. All manipulated categories achieve 100\% accuracy; two authentic clips are misclassified.}
+\label{tab:clean_category}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Category} & \textbf{Accuracy (\%)} & \textbf{Count} \\
+\midrule
+Real (authentic)         & 99.62 & 529 \\
+Audio-only fake          & 100.00 & 488 \\
+Video-only fake          & 100.00 & 494 \\
+Both modalities fake     & 100.00 & 488 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Missing-Modality Robustness}
+
+Table~\ref{tab:stress_results} and Table~\ref{tab:stress_category} present the evaluation under simulated stream loss. When the video stream is zeroed and $m_v = 0$, the gate correctly assigns $g_a = 1.0$ and $g_v = 0.0$, routing the entire decision to the audio encoder. When audio is absent, the reverse occurs ($g_a = 0.0$, $g_v = 1.0$).
 
 \begin{table*}[t]
 \centering
-\caption{Multimodal Deepfake Detection Performance on the Held-Out LAV-DF Test Partition. Best results in \textbf{bold}; second best \underline{underlined}.}
-\label{tab:lavdf_main_results}
+\caption{Full evaluation results under clean and missing-modality conditions. All metrics computed from raw confusion matrix counts on the same 1{,}999-sample test subset. $\Delta$Macro-F1 is the absolute change from the clean condition.}
+\label{tab:stress_results}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{lcccccccc}
+\begin{tabular}{lrrrrccccccccc}
 \toprule
-\textbf{Architecture} & \textbf{Modality} & \textbf{Accuracy (\%)} & \textbf{Balanced Acc (\%)} & \textbf{Precision (\%)} & \textbf{Recall (\%)} & \textbf{Macro-F1 (\%)} & \textbf{AUROC} & \textbf{ECE} \\
+\textbf{Condition} & \textbf{TP} & \textbf{TN} & \textbf{FP} & \textbf{FN} & \textbf{Acc (\%)} & \textbf{Bal. Acc (\%)} & \textbf{Prec (\%)} & \textbf{Recall (\%)} & \textbf{F1\textsubscript{Fake} (\%)} & \textbf{F1\textsubscript{Real} (\%)} & \textbf{Macro-F1 (\%)} & \textbf{AUROC} & \textbf{ECE} \\
 \midrule
-Audio Baseline     & Acoustic      & 68.40 & 54.10 & 72.30 & 82.50 & 42.86 & 0.7412 & 0.1820 \\
-Video Baseline     & Visual        & 74.20 & 61.80 & 76.80 & 87.40 & 58.10 & 0.8145 & 0.1412 \\
-Standard AV Fusion & Audio-Visual  & \underline{76.50} & \underline{64.20} & \underline{78.40} & \underline{88.90} & \underline{61.20} & \underline{0.8620} & \underline{0.1250} \\
-\textbf{RMS-AV (Proposed)} & Audio-Visual & \textbf{81.80} & \textbf{73.40} & \textbf{84.20} & \textbf{91.80} & \textbf{69.82} & \textbf{0.9674} & \textbf{0.0420} \\
+Clean           & 1{,}470 & 527 & 2   & 0   & 99.90 & 99.81 & 99.86 & 100.00 & 99.93 & 99.81 & 99.87 & 1.0000 & 0.002 \\
+Missing Video   & 1{,}221 & 521 & 8   & 249 & 87.14 & 90.77 & 99.35 & 83.06  & 90.48 & 80.22 & 85.35 & 0.9751 & 0.128 \\
+Missing Audio   & 1{,}470 & 511 & 18  & 0   & 99.10 & 98.30 & 98.79 & 100.00 & 99.39 & 98.27 & 98.83 & 0.9998 & 0.009 \\
 \bottomrule
 \end{tabular}%
 }
 \end{table*}
 
-\begin{figure}[t]
+\begin{table}[t]
 \centering
-\IfFileExists{figures/fig2_roc_curves.png}{%
-  \includegraphics[width=\columnwidth]{figures/fig2_roc_curves.png}%
-}{%
-  \fbox{\parbox{0.95\columnwidth}{\centering \vspace{1.0cm} \textbf{[Figure 3: ROC Benchmark Curves]} \\ \textit{RMS-AV achieves an AUROC of 0.9674 versus 0.8620 for standard fusion.}\\ \vspace{1.0cm}}}%
-}
-\caption{Receiver Operating Characteristic (ROC) curves on the held-out LAV-DF test partition. RMS-AV achieves an AUROC of 0.9674, markedly outperforming standard concatenation fusion (0.8620) and unimodal baselines.}
-\label{fig:roc_curves}
-\end{figure}
-
-\section{Experimental Results}
-\subsection{Main Benchmark Comparison}
-Table~\ref{tab:lavdf_main_results} reports quantitative evaluation across four architectural variants on the held-out test partition. Unimodal audio detection exhibits the lowest discriminability ($\text{AUROC} = 0.7412$, $\text{Macro-F1} = 42.86\%$), reflecting the challenge of detecting subtle acoustic vocoder traces. While standard concatenation fusion improves upon unimodal visual baselines ($\text{AUROC} = 0.8620$ vs. $0.8145$), it remains constrained by equal modality weighting. 
-
-RMS-AV outperforms all baselines across every metric, achieving \textbf{81.80\% accuracy}, \textbf{69.82\% Macro-F1}, and \textbf{0.9674 AUROC}. Furthermore, RMS-AV achieves an Expected Calibration Error (ECE) of $0.0420$, indicating well-calibrated confidence probabilities. The comparative ROC trajectories are illustrated in Fig.~\ref{fig:roc_curves}.
-
-\begin{figure*}[t]
-\centering
-\IfFileExists{figures/fig3_gate_dynamics.png}{%
-  \includegraphics[width=0.88\textwidth]{figures/fig3_gate_dynamics.png}%
-}{%
-  \fbox{\parbox{0.88\textwidth}{\centering \vspace{1.2cm} \textbf{[Figure 4: Dynamic Gate Attention Distribution]} \\ \textit{Mean gate weights and density distributions across asymmetric manipulation categories.}\\ \vspace{1.2cm}}}%
-}
-\caption{Empirical Behavior of Dynamic Reliability Gate. (a) Mean gate modulation across authentic, asymmetric forgery (visual-only vs. audio-only), dual forgery, and corrupted stream scenarios. (b) Kernel density distribution confirming focused weight concentration on manipulated streams.}
-\label{fig:gate_dynamics}
-\end{figure*}
-
-\subsection{Modality-Drop Stress Testing}
-In practical deployments, streaming channels frequently experience temporary signal dropouts, transmission corruption, or sensor occlusions. To evaluate robustness, we simulate single-stream loss by setting $m_v = 0$ or $m_a = 0$ across the evaluation set. 
-
-As summarized in Table~\ref{tab:stress_test} and illustrated in Fig.~\ref{fig:stress_test}, standard concatenation fusion collapses when either channel is missing ($\text{Macro-F1}$ drops from $61.20\%$ to $28.40\%$ under video loss and $31.20\%$ under audio loss, representing an average performance drop of $-31.40\%$). In sharp contrast, RMS-AV dynamically redistributes attention to the active stream via FP16 validity masking ($g_a = 1.0$ when $m_v = 0$), retaining \textbf{73.6\%} of its Macro-F1 score under video dropout and \textbf{89.0\%} under audio dropout, limiting overall degradation to $-13.07\%$.
-
-\begin{table}[ht]
-\centering
-\caption{Modality-Drop Robustness Evaluation across Test Partition. Measures Macro-F1 (\%) retention under corrupted or absent streams.}
-\label{tab:stress_test}
+\caption{Per-category accuracy (\%) under each evaluation condition.}
+\label{tab:stress_category}
 \resizebox{\columnwidth}{!}{%
-\begin{tabular}{lcccc}
+\begin{tabular}{lccc}
 \toprule
-\textbf{Model Mode} & \textbf{Clean} & \textbf{Missing Video} & \textbf{Missing Audio} & \textbf{Avg Retention ($\Delta$)} \\
+\textbf{Category} & \textbf{Clean} & \textbf{Missing Video} & \textbf{Missing Audio} \\
 \midrule
-Audio Baseline    & 42.86 & 42.86 & 0.00  & -21.43\% \\
-Video Baseline    & 58.10 & 0.00  & 58.10 & -29.05\% \\
-Standard AV Fusion& \underline{61.20} & \underline{28.40} & \underline{31.20} & -31.40\% \\
-\textbf{RMS-AV (Proposed)} & \textbf{69.82} & \textbf{51.40} & \textbf{62.10} & \textbf{-13.07\%} \\
+Real              & 99.62 & 98.49 & 96.60 \\
+Audio-only fake   & 100.00 & 95.70 & 100.00 \\
+Video-only fake   & 100.00 & 58.50 & 100.00 \\
+Both-modalities   & 100.00 & 95.29 & 100.00 \\
 \bottomrule
 \end{tabular}%
 }
 \end{table}
 
-\begin{figure}[ht]
-\centering
-\IfFileExists{figures/fig5_stress_test.png}{%
-  \includegraphics[width=\columnwidth]{figures/fig5_stress_test.png}%
-}{%
-  \fbox{\parbox{0.95\columnwidth}{\centering \vspace{1.0cm} \textbf{[Figure 5: Modality-Drop Stress Robustness]} \\ \textit{RMS-AV maintains 51.40\% and 62.10\% Macro-F1 under stream dropouts.}\\ \vspace{1.0cm}}}%
-}
-\caption{Modality-drop robustness evaluation. RMS-AV retains 73.6\% of its Macro-F1 performance when video is lost, whereas standard concatenation fusion suffers severe performance degradation.}
-\label{fig:stress_test}
-\end{figure}
+The key observations are:
 
-\subsection{Category-Wise Forensic Analysis}
-LAV-DF categorizes manipulations into four distinct regimes: \textit{Pristine}, \textit{Visual-Only Forgery} (FaceSwap, Lip-Sync modification), \textit{Acoustic-Only Forgery} (Neural Voice Cloning), and \textit{Joint Forgery}. Fig.~\ref{fig:gate_dynamics} visualizes the empirical gate weights computed by RMS-AV across these scenarios. 
-\begin{itemize}
-    \item On \textbf{Pristine} inputs, the gate maintains balanced attention ($g_v \approx 0.50, g_a \approx 0.50$), verifying cross-modal consistency.
-    \item On \textbf{Visual-Only Forgeries}, the gate dynamically upweights the visual embedding ($g_v = 0.84 \pm 0.05$), preventing pristine audio from diluting facial forgery evidence.
-    \item On \textbf{Acoustic-Only Forgeries}, the gate shifts dominance to the acoustic stream ($g_a = 0.87 \pm 0.04$).
-\end{itemize}
+\textbf{Missing video} reduces Macro-F1 from 99.87\% to 85.35\% (a 14.52 percentage-point drop). The 249 false negatives are concentrated in the video-only fake category, which drops from 100\% to 58.50\% accuracy. This is expected: when the video stream is absent, the model relies entirely on audio, and video-only forgeries leave no trace in the audio channel. The audio-only fake and both-modalities fake categories retain above 95\% accuracy because they contain audio manipulation that the acoustic encoder can detect.
 
-\subsection{Ablation Study}
-To evaluate the individual contribution of each architectural component, we conduct an ablation analysis on the LAV-DF benchmark, presented in Table~\ref{tab:ablation}. 
-\begin{table}[ht]
-\centering
-\caption{Ablation Study of RMS-AV Components on LAV-DF Test Partition.}
-\label{tab:ablation}
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lcccc}
-\toprule
-\textbf{Configuration} & \textbf{Accuracy (\%)} & \textbf{Macro-F1 (\%)} & \textbf{AUROC} & \textbf{Missing $\Delta$} \\
-\midrule
-RMS-AV (Full Model)                       & \textbf{81.80} & \textbf{69.82} & \textbf{0.9674} & \textbf{-13.07\%} \\
-w/o Cross-Modal Incoherence (CM-FCI)      & 77.90          & 64.10          & 0.9020          & -21.40\% \\
-w/o Temporal Saliency Aggregator (TSA)   & 79.50          & 66.80          & 0.9340          & -18.20\% \\
-w/o Dynamic Reliability Gate              & 76.50          & 61.20          & 0.8620          & -31.40\% \\
-w/o Auxiliary Loss ($\lambda_{\text{aux}}=0$) & 78.90      & 65.40          & 0.9120          & -19.80\% \\
-w/o FP16 Validity Masking                 & 79.40          & 66.10          & 0.9280          & -24.50\% \\
-\bottomrule
-\end{tabular}%
-}
-\end{table}
-Removing the Dynamic Reliability Gate causes the largest baseline collapse ($\text{AUROC} \downarrow 0.1054$), affirming that dynamic confidence estimation is critical for asymmetric deepfakes. Disabling Cross-Modal Forensic Contrastive Incoherence (CM-FCI) degrades Macro-F1 by $5.72\%$, demonstrating that explicit hyperspherical projection is indispensable for penalizing cross-modal dissonance. Ablating the Temporal Saliency Aggregator (TSA) causes an AUROC drop to $0.9340$, confirming that uniform temporal averaging fails to detect brief, localized boundary flickering and lip-sync jitter. Disabling auxiliary supervision ($\lambda_{\text{aux}} = 0$) degrades Macro-F1 by $4.42\%$, demonstrating that unimodal gradient regularization prevents feature collapse.
+\textbf{Missing audio} produces a much smaller degradation: Macro-F1 drops from 99.87\% to 98.83\% (1.04 percentage points). There are 18 additional false positives but zero false negatives. The visual encoder alone is sufficient to detect all manipulated categories, and the only errors are a small number of authentic clips incorrectly flagged. This asymmetry in degradation---the visual encoder is substantially more self-sufficient than the acoustic encoder---is consistent with the gate's learned preference for the visual modality ($g_v = 0.85$) during clean evaluation.
 
+\textbf{Calibration degradation.} The ECE increases from 0.002 (clean) to 0.128 (missing video), indicating that the model's probability estimates become poorly calibrated when operating with only audio. This is expected since the model was never trained with missing modalities, and suggests that post-hoc calibration or modality dropout training would be needed for deployment with unreliable streams.
+
+%% ====================================================================
+\section{Discussion}
+\label{sec:discussion}
+%% ====================================================================
+
+\subsection{Interpretation of Near-Perfect Clean Results}
+
+The clean evaluation results (99.90\% accuracy, 99.87\% Macro-F1, AUROC of 1.0000) appear unusually strong. Several factors likely contribute to this performance level, and we discuss them critically.
+
+\textbf{Oracle audio windowing.} The audio preprocessing centres the 4.0-second extraction window on the annotated manipulation midpoint. This means the model is guaranteed to receive the manipulated audio segment when one exists. At inference on unseen data without temporal annotations, an alternative strategy (e.g., sliding window, voice activity detection, or processing the full audio) would be needed, and performance may differ.
+
+\textbf{Subset evaluation.} The 1{,}999-sample test subset is drawn by stratified random sampling from the 26{,}100-sample official test partition. Although stratification preserves category proportions, the reduced sample size means the evaluation does not reflect the full diversity of the LAV-DF test set. Two errors out of 1{,}999 samples corresponds to an error rate of 0.10\%, but the 95\% Clopper-Pearson confidence interval for this error rate is approximately [0.01\%, 0.36\%], which is wide relative to the point estimate.
+
+\textbf{Transfer learning from ImageNet.} The ResNet-18 backbone is initialised with ImageNet-pretrained weights, which provides strong low-level visual feature extraction. Combined with a relatively small training set (8{,}000 clips), the pretrained features may account for much of the visual detection capability, and the TSA and gating mechanisms may contribute less marginal improvement than they would on a randomly initialised backbone. We cannot disentangle these contributions without running ablation experiments on the same data with the same training budget.
+
+\subsection{Missing-Modality Analysis}
+
+The missing-modality results demonstrate that the architectural validity masking provides a functional fallback mechanism even without explicit training for stream absence. However, two points merit emphasis:
+
+First, the missing-video degradation is entirely concentrated in the video-only fake category (58.50\% accuracy). This is not a model failure---it is a fundamental limitation: video-only forgeries leave no detectable trace in the audio channel. No amount of architectural design can overcome the absence of the relevant signal.
+
+Second, no modality dropout was applied during training. The baselines against which missing-modality robustness would ideally be compared---models trained with equivalent modality dropout---were not implemented due to computational constraints. It is therefore unknown whether the observed robustness is primarily due to the validity masking mechanism or would also be achieved by a simple concatenation model trained with dropout.
+
+\subsection{Absence of Independently Trained Baselines}
+
+The present study evaluates only the full RMS-AV model. We do not report results for audio-only, video-only, or standard concatenation fusion baselines trained on the same 8{,}000-sample subset. Without these comparisons, we cannot claim that the TSA, CM-FCI, or gating mechanisms improve detection performance relative to simpler alternatives. The numbers in Tables~\ref{tab:clean_results}--\ref{tab:stress_results} describe the absolute performance of a single architectural configuration, not a comparative evaluation.
+
+\subsection{CM-FCI Incoherence Separation}
+
+The CM-FCI module produces a clear empirical separation between authentic and manipulated samples on the validation set: $D_{\mathrm{inc}}^{\mathrm{real}} = 0.007$ versus $D_{\mathrm{inc}}^{\mathrm{fake}} = 0.666$ at Epoch 4 (Table~\ref{tab:training_history}). This $95\times$ ratio suggests that the contrastive objective successfully shapes the projection space, but we note two caveats: (i) the incoherence metric has not been evaluated as a standalone binary classifier (e.g., by thresholding $D_{\mathrm{inc}}$ directly and reporting its detection accuracy), and (ii) the contribution of $D_{\mathrm{inc}}$ as a feature to the gating network, versus the raw embeddings $\mathbf{h}_a$ and $\mathbf{h}_v$ that the gate also receives, has not been isolated through ablation.
+
+%% ====================================================================
+\section{Limitations and Future Work}
+\label{sec:limitations}
+%% ====================================================================
+
+We identify the following limitations and corresponding directions for future work:
+
+\begin{enumerate}
+    \item \textbf{Reduced training and evaluation scale.} The model is trained on 8{,}000 clips and evaluated on 1{,}999 clips, compared to the full LAV-DF benchmark of 78{,}703 training and 26{,}100 test clips. Full-scale training and evaluation are necessary before performance claims can be contextualised against published results on this benchmark.
+
+    \item \textbf{No independently trained baselines.} Comparative evaluation against audio-only, video-only, standard concatenation, and ablated (no-TSA, no-FCI, no-gate) variants trained on the identical subset is required to quantify the contribution of each component.
+
+    \item \textbf{Oracle audio windowing.} The manipulation-aware audio cropping policy uses ground-truth temporal annotations at both training and test time. For practical deployment, this must be replaced by an annotation-free strategy (e.g., processing the full audio, voice activity detection, or a learned temporal attention mechanism applied to the raw waveform).
+
+    \item \textbf{No modality dropout training.} The model is trained with both streams always present. Comparing against a version trained with stochastic modality dropout (e.g., randomly zeroing one stream with probability $p$) would clarify whether the missing-modality robustness is architectural or could be achieved more simply.
+
+    \item \textbf{No cross-dataset evaluation.} All training and evaluation use LAV-DF. Generalization to other datasets (e.g., FakeAVCeleb~\cite{khalid2021fakeavceleb}, DFDC~\cite{dolhansky2020dfdc}, or WildDeepfake) and to manipulation methods not represented in LAV-DF has not been tested.
+
+    \item \textbf{Single training run.} Results are from a single random seed (42). Reporting mean and standard deviation across multiple seeds would provide uncertainty estimates. The 95\% confidence interval on the clean error rate (2/1{,}999) is approximately [0.01\%, 0.36\%].
+
+    \item \textbf{Calibration under distribution shift.} The ECE of 0.128 under missing-video conditions indicates that predicted probabilities become unreliable when the input distribution shifts from training conditions. Post-hoc calibration methods (e.g., temperature scaling on a validation set) should be explored.
+
+    \item \textbf{Temporal localisation not evaluated.} LAV-DF provides temporal boundaries for manipulation segments, and the original benchmark includes temporal localisation metrics. Our model performs clip-level binary classification only and does not attempt temporal localisation.
+\end{enumerate}
+
+%% ====================================================================
 \section{Conclusion}
-We presented RMS-AV, a multimodal deepfake detection architecture that resolves the critical vulnerability of asymmetric modality manipulation. By unifying dynamic reliability gating, Cross-Modal Forensic Contrastive Incoherence (CM-FCI), the Temporal Saliency Aggregator (TSA), and multi-task auxiliary supervision, RMS-AV achieves state-of-the-art performance on the 136,304-recording LAV-DF benchmark, reaching an AUROC of 0.9674 while delivering exceptional robustness under single-channel failure.
+%% ====================================================================
 
+We presented RMS-AV, an audio-visual deepfake detection architecture that integrates temporal saliency aggregation over video frames, a supervised cross-modal contrastive incoherence metric, a dynamic reliability gate with validity masking for missing-stream handling, and auxiliary unimodal classification heads. Evaluated on a stratified subset of the LAV-DF benchmark (8{,}000 training clips, 1{,}999 test clips), RMS-AV achieves 99.90\% accuracy and 99.87\% Macro-F1 on clean evaluation, retains 85.35\% Macro-F1 under complete video dropout (with degradation concentrated in the expected category of video-only forgeries), and retains 98.83\% Macro-F1 under audio dropout. These results demonstrate functional missing-modality fallback through architectural validity masking, even without modality dropout training.
+
+We have been explicit about the limitations of the current evaluation: the reduced data scale, the absence of trained baselines and ablation experiments, the oracle audio windowing policy, and the lack of cross-dataset evidence. These limitations define the scope of the present contribution as a proof-of-concept architectural study rather than a state-of-the-art benchmark result. Future work will address full-scale training, comparative and ablation evaluation, annotation-free audio processing, and cross-dataset generalisation.
+
+%% ====================================================================
+%% REFERENCES
+%% ====================================================================
 \bibliographystyle{IEEEtran}
 \begin{thebibliography}{00}
-\bibitem{rossler2019faceforensics} A. R{\"o}ssler et al., ``FaceForensics++: Learning to detect manipulated facial images,'' in \textit{Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV)}, 2019, pp. 1--11.
-\bibitem{korshunov2018deepfakes} P. Korshunov and S. Marcel, ``DeepFakes: a new threat to face recognition? Assessment and detection,'' \textit{arXiv preprint arXiv:1812.08685}, 2018.
-\bibitem{haliassos2021lips} A. Haliassos et al., ``Lips don't lie: A generalisable and robust approach to face forgery detection,'' in \textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2021, pp. 5039--5049.
-\bibitem{cai2022lavdf} Y. Cai et al., ``Do you really mean that? Content-driven audio-visual deepfake detection and localization,'' in \textit{Proc. ACM Int. Conf. Multimedia (ACM MM)}, 2022, pp. 5621--5630.
+
+\bibitem{rossler2019faceforensics} A. R{\"o}ssler, D. Cozzolino, L. Verdoliva, C. Riess, J. Thies, and M. Nie{\ss}ner, ``FaceForensics++: Learning to detect manipulated facial images,'' in \textit{Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV)}, 2019, pp. 1--11.
+
+\bibitem{korshunov2018deepfakes} P. Korshunov and S. Marcel, ``DeepFakes: A new threat to face recognition? Assessment and detection,'' \textit{arXiv preprint arXiv:1812.08685}, 2018.
+
+\bibitem{haliassos2021lips} A. Haliassos, K. Vougioukas, S. Petridis, and M. Pantic, ``Lips don't lie: A generalisable and robust approach to face forgery detection,'' in \textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2021, pp. 5039--5049.
+
+\bibitem{cai2022lavdf} Z. Cai, S. Stefanov, A. Dhall, and M. Hayat, ``Do you really mean that? Content driven audio-visual deepfake dataset and multimodal method for temporal forgery localization,'' in \textit{Proc. IEEE Int. Conf. Digit. Signal Process. (DSP)}, 2022, pp. 1--7.
+
 \bibitem{zhou2021joint} Y. Zhou and S.-N. Lim, ``Joint audio-visual deepfake detection,'' in \textit{Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV)}, 2021, pp. 14800--14809.
-\bibitem{mittal2020emotions} T. Mittal et al., ``Emotions don't lie: An audio-visual deepfake detection approach using affective cues,'' in \textit{Proc. ACM Int. Conf. Multimedia (ACM MM)}, 2020, pp. 2823--2832.
+
+\bibitem{mittal2020emotions} T. Mittal, U. Bhatt, T. Khare, and L. Davis, ``Emotions don't lie: An audio-visual deepfake detection method using affective cues,'' in \textit{Proc. ACM Int. Conf. Multimedia (MM)}, 2020, pp. 2823--2832.
+
+\bibitem{chugh2020not} K. Chugh, P. Gupta, A. Dhall, and R. Subramanian, ``Not made for each other---audio-visual dissonance-based deepfake detection and localization,'' in \textit{Proc. ACM Int. Conf. Multimedia (MM)}, 2020, pp. 439--447.
+
+\bibitem{feng2023selfsuper} C. Feng, Z. Chen, and A. Owens, ``Self-supervised video forensics by audio-visual anomaly detection,'' in \textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2023, pp. 10491--10503.
+
+\bibitem{ilyas2023avfakenet} H. Ilyas, A. Javed, and K. M. Malik, ``AVFakeNet: A unified end-to-end Dense Swin Transformer deep learning model for audio-visual deepfakes detection,'' \textit{Applied Soft Computing}, vol. 136, p. 110124, 2023.
+
+\bibitem{coccomini2022combining} D. A. Coccomini, N. Messina, C. Gennaro, and F. Falchi, ``Combining EfficientNet and vision transformers for video deepfake detection,'' in \textit{Proc. Int. Conf. Image Anal. Process. (ICIAP)}, 2022, pp. 219--229.
+
+\bibitem{yamagishi2021asvspoof} J. Yamagishi, X. Wang, M. Todisco, \textit{et al.}, ``ASVspoof 2021: Accelerating progress in spoofed and deepfake speech detection,'' in \textit{Proc. ASVspoof Challenge Workshop}, 2021, pp. 47--54.
+
+\bibitem{ma2022multimodal} M. Ma, J. Ren, L. Zhao, S. Tulyakov, C. Wu, and X. Peng, ``SMIL: Multimodal learning with severely missing modality,'' in \textit{Proc. AAAI Conf. Artif. Intell.}, 2022, pp. 2302--2310.
+
+\bibitem{khalid2021fakeavceleb} H. Khalid, S. H. Kim, and S. S. Woo, ``FakeAVCeleb: A novel audio-video multimodal deepfake dataset,'' in \textit{Proc. NeurIPS Datasets and Benchmarks}, 2021.
+
+\bibitem{dolhansky2020dfdc} B. Dolhansky, J. Bitton, B. Pflaum, \textit{et al.}, ``The DeepFake Detection Challenge dataset,'' \textit{arXiv preprint arXiv:2006.07397}, 2020.
+
 \end{thebibliography}
 
 \end{document}
